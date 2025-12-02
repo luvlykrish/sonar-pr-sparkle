@@ -1,0 +1,232 @@
+name: SonarQube PR Scan
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
+      - develop
+      - master
+
+permissions:
+  pull-requests: write
+  contents: read
+  checks: write
+
+jobs:
+  sonarqube-scan:
+    name: SonarQube Code Analysis
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Shallow clones should be disabled for better analysis
+          
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Run tests with coverage
+        run: npm run test -- --coverage --watchAll=false || true
+        continue-on-error: true
+        
+      - name: SonarQube Scan
+        uses: sonarsource/sonarqube-scan-action@master
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        with:
+          args: >
+            -Dsonar.projectKey=${{ github.repository_owner }}_${{ github.event.repository.name }}
+            -Dsonar.projectName=${{ github.event.repository.name }}
+            -Dsonar.sources=src
+            -Dsonar.tests=src
+            -Dsonar.test.inclusions=**/*.test.ts,**/*.test.tsx,**/*.spec.ts,**/*.spec.tsx
+            -Dsonar.exclusions=**/*.test.ts,**/*.test.tsx,**/*.spec.ts,**/*.spec.tsx,**/node_modules/**,**/dist/**,**/build/**,**/coverage/**
+            -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
+            -Dsonar.typescript.tsconfigPath=tsconfig.json
+            -Dsonar.pullrequest.key=${{ github.event.pull_request.number }}
+            -Dsonar.pullrequest.branch=${{ github.event.pull_request.head.ref }}
+            -Dsonar.pullrequest.base=${{ github.event.pull_request.base.ref }}
+            -Dsonar.scm.provider=git
+            
+      - name: Wait for Quality Gate
+        id: sonarqube-quality-gate
+        uses: sonarsource/sonarqube-quality-gate-action@master
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          
+      - name: Save SonarQube results
+        if: always()
+        run: |
+          mkdir -p sonar-results
+          echo "Quality Gate Status: ${{ steps.sonarqube-quality-gate.outputs.quality-gate-status }}" > sonar-results/summary.txt
+          echo "Project Status: ${{ steps.sonarqube-quality-gate.outputs.project-status }}" >> sonar-results/summary.txt
+          
+      - name: Upload SonarQube results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonarqube-results
+          path: sonar-results/
+          retention-days: 30
+          
+  sonarqube-report:
+    name: Generate SonarQube Report
+    needs: sonarqube-scan
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Download SonarQube results
+        uses: actions/download-artifact@v4
+        with:
+          name: sonarqube-results
+          path: sonar-results/
+          
+      - name: Fetch SonarQube metrics
+        id: fetch-metrics
+        run: |
+          PROJECT_KEY="${{ github.repository_owner }}_${{ github.event.repository.name }}"
+          
+          # Fetch measures from SonarQube API
+          RESPONSE=$(curl -s -u "${{ secrets.SONAR_TOKEN }}:" \
+            "${{ secrets.SONAR_HOST_URL }}/api/measures/component?component=${PROJECT_KEY}&metricKeys=bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density,security_hotspots,reliability_rating,security_rating,sqale_rating")
+          
+          echo "sonar_response<<EOF" >> $GITHUB_OUTPUT
+          echo "$RESPONSE" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+      - name: Parse and summarize results
+        id: summarize
+        run: |
+          cat > summary.md << 'EOF'
+          ## 🔍 SonarQube Analysis Results
+          
+          ### Quality Gate: ${{ needs.sonarqube-scan.result == 'success' && '✅ PASSED' || '❌ FAILED' }}
+          
+          **Pull Request:** #${{ github.event.pull_request.number }}
+          **Branch:** `${{ github.event.pull_request.head.ref }}`
+          
+          ---
+          
+          ### 📊 Code Quality Metrics
+          
+          | Metric | Value |
+          |--------|-------|
+          | 🐛 Bugs | View in SonarQube |
+          | 🔒 Vulnerabilities | View in SonarQube |
+          | 💡 Code Smells | View in SonarQube |
+          | 🔥 Security Hotspots | View in SonarQube |
+          | 📈 Coverage | View in SonarQube |
+          | 📋 Duplications | View in SonarQube |
+          
+          ### 🎯 Ratings
+          
+          | Category | Rating |
+          |----------|--------|
+          | Reliability | View in SonarQube |
+          | Security | View in SonarQube |
+          | Maintainability | View in SonarQube |
+          
+          ---
+          
+          ### 🔗 Links
+          
+          - [View Full Report in SonarQube](${{ secrets.SONAR_HOST_URL }}/dashboard?id=${{ github.repository_owner }}_${{ github.event.repository.name }}&pullRequest=${{ github.event.pull_request.number }})
+          - [Quality Gate Details](${{ secrets.SONAR_HOST_URL }}/project/quality_gate?id=${{ github.repository_owner }}_${{ github.event.repository.name }})
+          
+          ---
+          
+          <details>
+          <summary>📝 View Raw Analysis Data</summary>
+          
+          ```json
+          ${{ steps.fetch-metrics.outputs.sonar_response }}
+          ```
+          
+          </details>
+          
+          > **Note:** Click on the SonarQube link above to see detailed metrics and code issues.
+          EOF
+          
+          echo "summary_created=true" >> $GITHUB_OUTPUT
+          
+      - name: Comment PR with results
+        uses: actions/github-script@v7
+        if: steps.summarize.outputs.summary_created == 'true'
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const summary = fs.readFileSync('summary.md', 'utf8');
+            
+            // Find existing comment
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            
+            const botComment = comments.data.find(comment => 
+              comment.user.type === 'Bot' && 
+              comment.body.includes('🔍 SonarQube Analysis Results')
+            );
+            
+            // Update or create comment
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: summary
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: summary
+              });
+            }
+            
+      - name: Create Check Run
+        uses: actions/github-script@v7
+        if: always()
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const qualityGateStatus = '${{ needs.sonarqube-scan.result }}';
+            const conclusion = qualityGateStatus === 'success' ? 'success' : 'failure';
+            
+            await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: 'SonarQube Quality Gate',
+              head_sha: context.payload.pull_request.head.sha,
+              status: 'completed',
+              conclusion: conclusion,
+              output: {
+                title: `Quality Gate ${conclusion === 'success' ? 'Passed ✅' : 'Failed ❌'}`,
+                summary: `SonarQube analysis completed with status: ${conclusion}`,
+                text: `View detailed results at: ${{ secrets.SONAR_HOST_URL }}/dashboard?id=${{ github.repository_owner }}_${{ github.event.repository.name }}&pullRequest=${{ github.event.pull_request.number }}`
+              }
+            });
+            
+      - name: Fail workflow if quality gate failed
+        if: needs.sonarqube-scan.result != 'success'
+        run: |
+          echo "::error::SonarQube Quality Gate failed!"
+          exit 1
