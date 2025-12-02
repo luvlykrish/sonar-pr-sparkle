@@ -17,6 +17,22 @@ jobs:
   sonarqube-scan:
     name: SonarQube Code Analysis
     runs-on: ubuntu-latest
+    outputs:
+      sonar-results-json: ${{ steps.export-json.outputs.results }}
+      threshold-exceeded: ${{ steps.export-json.outputs.threshold_exceeded }}
+      quality-gate-status: ${{ steps.sonarqube-quality-gate.outputs.quality-gate-status }}
+    
+    env:
+      # Quality Thresholds - Customize these values based on your requirements
+      THRESHOLD_BUGS: 0
+      THRESHOLD_VULNERABILITIES: 0
+      THRESHOLD_CODE_SMELLS: 10
+      THRESHOLD_SECURITY_HOTSPOTS: 0
+      THRESHOLD_COVERAGE_MIN: 80.0
+      THRESHOLD_DUPLICATIONS_MAX: 3.0
+      THRESHOLD_BLOCKER_ISSUES: 0
+      THRESHOLD_CRITICAL_ISSUES: 0
+      THRESHOLD_MAJOR_ISSUES: 5
     
     steps:
       - name: Checkout code
@@ -65,14 +81,230 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
           
-      - name: Save SonarQube results
+      - name: Fetch and Export SonarQube Results as JSON
+        id: export-json
         if: always()
         run: |
-          mkdir -p sonar-results
-          echo "Quality Gate Status: ${{ steps.sonarqube-quality-gate.outputs.quality-gate-status }}" > sonar-results/summary.txt
-          echo "Project Status: ${{ steps.sonarqube-quality-gate.outputs.project-status }}" >> sonar-results/summary.txt
+          PROJECT_KEY="${{ github.repository_owner }}_${{ github.event.repository.name }}"
+          PR_NUMBER="${{ github.event.pull_request.number }}"
           
-      - name: Upload SonarQube results
+          # Fetch measures from SonarQube API
+          MEASURES=$(curl -s -u "${{ secrets.SONAR_TOKEN }}:" \
+            "${{ secrets.SONAR_HOST_URL }}/api/measures/component?component=${PROJECT_KEY}&metricKeys=bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density,security_hotspots,reliability_rating,security_rating,sqale_rating&pullRequest=${PR_NUMBER}")
+          
+          # Fetch detailed issues
+          ISSUES=$(curl -s -u "${{ secrets.SONAR_TOKEN }}:" \
+            "${{ secrets.SONAR_HOST_URL }}/api/issues/search?componentKeys=${PROJECT_KEY}&pullRequest=${PR_NUMBER}&resolved=false&statuses=OPEN,CONFIRMED,REOPENED&ps=500")
+          
+          # Fetch quality gate status
+          QG_STATUS=$(curl -s -u "${{ secrets.SONAR_TOKEN }}:" \
+            "${{ secrets.SONAR_HOST_URL }}/api/qualitygates/project_status?projectKey=${PROJECT_KEY}&pullRequest=${PR_NUMBER}")
+          
+          # Install jq for JSON parsing
+          sudo apt-get update && sudo apt-get install -y jq
+          
+          # Extract metric values
+          BUGS=$(echo "$MEASURES" | jq -r '.component.measures[] | select(.metric=="bugs") | .value // "0"')
+          VULNERABILITIES=$(echo "$MEASURES" | jq -r '.component.measures[] | select(.metric=="vulnerabilities") | .value // "0"')
+          CODE_SMELLS=$(echo "$MEASURES" | jq -r '.component.measures[] | select(.metric=="code_smells") | .value // "0"')
+          COVERAGE=$(echo "$MEASURES" | jq -r '.component.measures[] | select(.metric=="coverage") | .value // "0"')
+          DUPLICATIONS=$(echo "$MEASURES" | jq -r '.component.measures[] | select(.metric=="duplicated_lines_density") | .value // "0"')
+          HOTSPOTS=$(echo "$MEASURES" | jq -r '.component.measures[] | select(.metric=="security_hotspots") | .value // "0"')
+          RELIABILITY_RATING=$(echo "$MEASURES" | jq -r '.component.measures[] | select(.metric=="reliability_rating") | .value // "0"')
+          SECURITY_RATING=$(echo "$MEASURES" | jq -r '.component.measures[] | select(.metric=="security_rating") | .value // "0"')
+          MAINTAINABILITY_RATING=$(echo "$MEASURES" | jq -r '.component.measures[] | select(.metric=="sqale_rating") | .value // "0"')
+          
+          # Quality Gate status
+          QG_RESULT=$(echo "$QG_STATUS" | jq -r '.projectStatus.status // "UNKNOWN"')
+          
+          # Count issues by severity
+          BLOCKER_COUNT=$(echo "$ISSUES" | jq '[.issues[] | select(.severity=="BLOCKER")] | length')
+          CRITICAL_COUNT=$(echo "$ISSUES" | jq '[.issues[] | select(.severity=="CRITICAL")] | length')
+          MAJOR_COUNT=$(echo "$ISSUES" | jq '[.issues[] | select(.severity=="MAJOR")] | length')
+          MINOR_COUNT=$(echo "$ISSUES" | jq '[.issues[] | select(.severity=="MINOR")] | length')
+          TOTAL_ISSUES=$(echo "$ISSUES" | jq '.total // 0')
+          
+          # Count issues by type
+          BUG_ISSUES=$(echo "$ISSUES" | jq '[.issues[] | select(.type=="BUG")] | length')
+          VULNERABILITY_ISSUES=$(echo "$ISSUES" | jq '[.issues[] | select(.type=="VULNERABILITY")] | length')
+          CODE_SMELL_ISSUES=$(echo "$ISSUES" | jq '[.issues[] | select(.type=="CODE_SMELL")] | length')
+          SECURITY_HOTSPOT_ISSUES=$(echo "$ISSUES" | jq '[.issues[] | select(.type=="SECURITY_HOTSPOT")] | length')
+          
+          # Check thresholds
+          THRESHOLD_EXCEEDED="false"
+          THRESHOLD_VIOLATIONS=()
+          
+          if [ "$BUGS" -gt "${{ env.THRESHOLD_BUGS }}" ]; then
+            THRESHOLD_EXCEEDED="true"
+            THRESHOLD_VIOLATIONS+=("bugs")
+          fi
+          
+          if [ "$VULNERABILITIES" -gt "${{ env.THRESHOLD_VULNERABILITIES }}" ]; then
+            THRESHOLD_EXCEEDED="true"
+            THRESHOLD_VIOLATIONS+=("vulnerabilities")
+          fi
+          
+          if [ "$CODE_SMELLS" -gt "${{ env.THRESHOLD_CODE_SMELLS }}" ]; then
+            THRESHOLD_EXCEEDED="true"
+            THRESHOLD_VIOLATIONS+=("code_smells")
+          fi
+          
+          if [ "$HOTSPOTS" -gt "${{ env.THRESHOLD_SECURITY_HOTSPOTS }}" ]; then
+            THRESHOLD_EXCEEDED="true"
+            THRESHOLD_VIOLATIONS+=("security_hotspots")
+          fi
+          
+          if (( $(echo "$COVERAGE < ${{ env.THRESHOLD_COVERAGE_MIN }}" | bc -l) )); then
+            THRESHOLD_EXCEEDED="true"
+            THRESHOLD_VIOLATIONS+=("coverage")
+          fi
+          
+          if (( $(echo "$DUPLICATIONS > ${{ env.THRESHOLD_DUPLICATIONS_MAX }}" | bc -l) )); then
+            THRESHOLD_EXCEEDED="true"
+            THRESHOLD_VIOLATIONS+=("duplications")
+          fi
+          
+          if [ "$BLOCKER_COUNT" -gt "${{ env.THRESHOLD_BLOCKER_ISSUES }}" ]; then
+            THRESHOLD_EXCEEDED="true"
+            THRESHOLD_VIOLATIONS+=("blocker_issues")
+          fi
+          
+          if [ "$CRITICAL_COUNT" -gt "${{ env.THRESHOLD_CRITICAL_ISSUES }}" ]; then
+            THRESHOLD_EXCEEDED="true"
+            THRESHOLD_VIOLATIONS+=("critical_issues")
+          fi
+          
+          if [ "$MAJOR_COUNT" -gt "${{ env.THRESHOLD_MAJOR_ISSUES }}" ]; then
+            THRESHOLD_EXCEEDED="true"
+            THRESHOLD_VIOLATIONS+=("major_issues")
+          fi
+          
+          # Convert violations array to JSON array
+          VIOLATIONS_JSON=$(printf '%s\n' "${THRESHOLD_VIOLATIONS[@]}" | jq -R . | jq -s .)
+          
+          # Extract detailed issues list (limited to 100 for JSON size)
+          ISSUES_DETAILED=$(echo "$ISSUES" | jq '[.issues[:100] | .[] | {
+            severity: .severity,
+            type: .type,
+            rule: .rule,
+            message: .message,
+            component: .component,
+            line: .line,
+            status: .status,
+            effort: .effort,
+            creationDate: .creationDate
+          }]')
+          
+          # Create comprehensive JSON output
+          cat > sonar-results.json << EOF
+          {
+            "scan_metadata": {
+              "project_key": "${PROJECT_KEY}",
+              "pull_request": "${PR_NUMBER}",
+              "branch": "${{ github.event.pull_request.head.ref }}",
+              "base_branch": "${{ github.event.pull_request.base.ref }}",
+              "commit_sha": "${{ github.event.pull_request.head.sha }}",
+              "scan_date": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+              "sonarqube_url": "${{ secrets.SONAR_HOST_URL }}"
+            },
+            "quality_gate": {
+              "status": "${QG_RESULT}",
+              "passed": $(if [ "$QG_RESULT" = "OK" ]; then echo "true"; else echo "false"; fi)
+            },
+            "metrics": {
+              "bugs": {
+                "value": ${BUGS},
+                "threshold": ${{ env.THRESHOLD_BUGS }},
+                "exceeded": $(if [ "$BUGS" -gt "${{ env.THRESHOLD_BUGS }}" ]; then echo "true"; else echo "false"; fi)
+              },
+              "vulnerabilities": {
+                "value": ${VULNERABILITIES},
+                "threshold": ${{ env.THRESHOLD_VULNERABILITIES }},
+                "exceeded": $(if [ "$VULNERABILITIES" -gt "${{ env.THRESHOLD_VULNERABILITIES }}" ]; then echo "true"; else echo "false"; fi)
+              },
+              "code_smells": {
+                "value": ${CODE_SMELLS},
+                "threshold": ${{ env.THRESHOLD_CODE_SMELLS }},
+                "exceeded": $(if [ "$CODE_SMELLS" -gt "${{ env.THRESHOLD_CODE_SMELLS }}" ]; then echo "true"; else echo "false"; fi)
+              },
+              "security_hotspots": {
+                "value": ${HOTSPOTS},
+                "threshold": ${{ env.THRESHOLD_SECURITY_HOTSPOTS }},
+                "exceeded": $(if [ "$HOTSPOTS" -gt "${{ env.THRESHOLD_SECURITY_HOTSPOTS }}" ]; then echo "true"; else echo "false"; fi)
+              },
+              "coverage": {
+                "value": ${COVERAGE},
+                "threshold": ${{ env.THRESHOLD_COVERAGE_MIN }},
+                "unit": "percent",
+                "exceeded": $(if (( $(echo "$COVERAGE < ${{ env.THRESHOLD_COVERAGE_MIN }}" | bc -l) )); then echo "true"; else echo "false"; fi)
+              },
+              "duplications": {
+                "value": ${DUPLICATIONS},
+                "threshold": ${{ env.THRESHOLD_DUPLICATIONS_MAX }},
+                "unit": "percent",
+                "exceeded": $(if (( $(echo "$DUPLICATIONS > ${{ env.THRESHOLD_DUPLICATIONS_MAX }}" | bc -l) )); then echo "true"; else echo "false"; fi)
+              },
+              "reliability_rating": ${RELIABILITY_RATING},
+              "security_rating": ${SECURITY_RATING},
+              "maintainability_rating": ${MAINTAINABILITY_RATING}
+            },
+            "issues_summary": {
+              "total": ${TOTAL_ISSUES},
+              "by_severity": {
+                "blocker": {
+                  "count": ${BLOCKER_COUNT},
+                  "threshold": ${{ env.THRESHOLD_BLOCKER_ISSUES }},
+                  "exceeded": $(if [ "$BLOCKER_COUNT" -gt "${{ env.THRESHOLD_BLOCKER_ISSUES }}" ]; then echo "true"; else echo "false"; fi)
+                },
+                "critical": {
+                  "count": ${CRITICAL_COUNT},
+                  "threshold": ${{ env.THRESHOLD_CRITICAL_ISSUES }},
+                  "exceeded": $(if [ "$CRITICAL_COUNT" -gt "${{ env.THRESHOLD_CRITICAL_ISSUES }}" ]; then echo "true"; else echo "false"; fi)
+                },
+                "major": {
+                  "count": ${MAJOR_COUNT},
+                  "threshold": ${{ env.THRESHOLD_MAJOR_ISSUES }},
+                  "exceeded": $(if [ "$MAJOR_COUNT" -gt "${{ env.THRESHOLD_MAJOR_ISSUES }}" ]; then echo "true"; else echo "false"; fi)
+                },
+                "minor": {
+                  "count": ${MINOR_COUNT}
+                }
+              },
+              "by_type": {
+                "bug": ${BUG_ISSUES},
+                "vulnerability": ${VULNERABILITY_ISSUES},
+                "code_smell": ${CODE_SMELL_ISSUES},
+                "security_hotspot": ${SECURITY_HOTSPOT_ISSUES}
+              }
+            },
+            "threshold_check": {
+              "exceeded": ${THRESHOLD_EXCEEDED},
+              "violations": ${VIOLATIONS_JSON}
+            },
+            "issues_detailed": ${ISSUES_DETAILED},
+            "links": {
+              "dashboard": "${{ secrets.SONAR_HOST_URL }}/dashboard?id=${PROJECT_KEY}&pullRequest=${PR_NUMBER}",
+              "issues": "${{ secrets.SONAR_HOST_URL }}/project/issues?id=${PROJECT_KEY}&pullRequest=${PR_NUMBER}",
+              "quality_gate": "${{ secrets.SONAR_HOST_URL }}/project/quality_gate?id=${PROJECT_KEY}"
+            }
+          }
+          EOF
+          
+          # Set outputs for downstream jobs
+          echo "threshold_exceeded=${THRESHOLD_EXCEEDED}" >> $GITHUB_OUTPUT
+          
+          # Export as multiline output (base64 encoded to handle special characters)
+          RESULTS_BASE64=$(cat sonar-results.json | base64 -w 0)
+          echo "results=${RESULTS_BASE64}" >> $GITHUB_OUTPUT
+          
+          # Also save to file for artifact
+          mkdir -p sonar-results
+          cp sonar-results.json sonar-results/
+          echo "Quality Gate Status: ${QG_RESULT}" > sonar-results/summary.txt
+          echo "Threshold Exceeded: ${THRESHOLD_EXCEEDED}" >> sonar-results/summary.txt
+          echo "Threshold Violations: ${THRESHOLD_VIOLATIONS[@]}" >> sonar-results/summary.txt
+          
+      - name: Upload SonarQube JSON Results
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -85,6 +317,8 @@ jobs:
     needs: sonarqube-scan
     runs-on: ubuntu-latest
     if: always()
+    outputs:
+      json-results: ${{ steps.process-json.outputs.results }}
     
     steps:
       - name: Checkout code
@@ -95,24 +329,47 @@ jobs:
         with:
           name: sonarqube-results
           path: sonar-results/
+      
+      - name: Process JSON Results
+        id: process-json
+        run: |
+          # Decode base64 JSON from previous job
+          echo "${{ needs.sonarqube-scan.outputs.sonar-results-json }}" | base64 -d > processed-results.json
           
-      - name: Fetch SonarQube metrics and issues
+          # Display summary
+          echo "=== SonarQube Analysis Summary ==="
+          cat processed-results.json | jq -r '
+            "Project: \(.scan_metadata.project_key)",
+            "PR#: \(.scan_metadata.pull_request)",
+            "Quality Gate: \(.quality_gate.status)",
+            "Threshold Exceeded: \(.threshold_check.exceeded)",
+            "",
+            "Metrics:",
+            "  Bugs: \(.metrics.bugs.value) (threshold: \(.metrics.bugs.threshold))",
+            "  Vulnerabilities: \(.metrics.vulnerabilities.value) (threshold: \(.metrics.vulnerabilities.threshold))",
+            "  Code Smells: \(.metrics.code_smells.value) (threshold: \(.metrics.code_smells.threshold))",
+            "  Coverage: \(.metrics.coverage.value)% (threshold: \(.metrics.coverage.threshold)%)",
+            "  Duplications: \(.metrics.duplications.value)% (threshold: \(.metrics.duplications.threshold)%)",
+            "",
+            "Issues by Severity:",
+            "  Blocker: \(.issues_summary.by_severity.blocker.count)",
+            "  Critical: \(.issues_summary.by_severity.critical.count)",
+            "  Major: \(.issues_summary.by_severity.major.count)",
+            "  Minor: \(.issues_summary.by_severity.minor.count)"
+          '
+          
+          # Set output for downstream consumption
+          RESULTS_BASE64=$(cat processed-results.json | base64 -w 0)
+          echo "results=${RESULTS_BASE64}" >> $GITHUB_OUTPUT
+          
+      - name: Load and Parse JSON Results
         id: fetch-metrics
         run: |
-          PROJECT_KEY="${{ github.repository_owner }}_${{ github.event.repository.name }}"
-          PR_NUMBER="${{ github.event.pull_request.number }}"
-          
-          # Fetch measures from SonarQube API
-          MEASURES=$(curl -s -u "${{ secrets.SONAR_TOKEN }}:" \
-            "${{ secrets.SONAR_HOST_URL }}/api/measures/component?component=${PROJECT_KEY}&metricKeys=bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density,security_hotspots,reliability_rating,security_rating,sqale_rating&pullRequest=${PR_NUMBER}")
-          
-          # Fetch detailed issues (bugs, vulnerabilities, code smells)
-          ISSUES=$(curl -s -u "${{ secrets.SONAR_TOKEN }}:" \
-            "${{ secrets.SONAR_HOST_URL }}/api/issues/search?componentKeys=${PROJECT_KEY}&pullRequest=${PR_NUMBER}&resolved=false&statuses=OPEN,CONFIRMED,REOPENED&ps=100")
-          
-          # Fetch quality gate status
-          QG_STATUS=$(curl -s -u "${{ secrets.SONAR_TOKEN }}:" \
-            "${{ secrets.SONAR_HOST_URL }}/api/qualitygates/project_status?projectKey=${PROJECT_KEY}&pullRequest=${PR_NUMBER}")
+          # Use the JSON file from artifacts
+          MEASURES=$(cat sonar-results/sonar-results.json | jq -r '.metrics')
+          ISSUES=$(cat sonar-results/sonar-results.json | jq -r '.issues_detailed')
+          QG_STATUS=$(cat sonar-results/sonar-results.json | jq -r '.quality_gate')
+          THRESHOLD_INFO=$(cat sonar-results/sonar-results.json | jq -r '.threshold_check')
           
           echo "measures<<EOF" >> $GITHUB_OUTPUT
           echo "$MEASURES" >> $GITHUB_OUTPUT
@@ -126,27 +383,46 @@ jobs:
           echo "$QG_STATUS" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
           
+          echo "threshold_info<<EOF" >> $GITHUB_OUTPUT
+          echo "$THRESHOLD_INFO" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
       - name: Parse and summarize results
         id: summarize
         run: |
           # Install jq for JSON parsing
           sudo apt-get update && sudo apt-get install -y jq
           
-          # Parse metrics
-          MEASURES='${{ steps.fetch-metrics.outputs.measures }}'
-          ISSUES='${{ steps.fetch-metrics.outputs.issues }}'
-          QG_STATUS='${{ steps.fetch-metrics.outputs.quality_gate }}'
+          # Load full JSON results
+          FULL_RESULTS=$(cat sonar-results/sonar-results.json)
           
-          # Extract metric values
-          BUGS=$(echo "$MEASURES" | jq -r '.component.measures[] | select(.metric=="bugs") | .value // "0"')
-          VULNERABILITIES=$(echo "$MEASURES" | jq -r '.component.measures[] | select(.metric=="vulnerabilities") | .value // "0"')
-          CODE_SMELLS=$(echo "$MEASURES" | jq -r '.component.measures[] | select(.metric=="code_smells") | .value // "0"')
-          COVERAGE=$(echo "$MEASURES" | jq -r '.component.measures[] | select(.metric=="coverage") | .value // "N/A"')
-          DUPLICATIONS=$(echo "$MEASURES" | jq -r '.component.measures[] | select(.metric=="duplicated_lines_density") | .value // "N/A"')
-          HOTSPOTS=$(echo "$MEASURES" | jq -r '.component.measures[] | select(.metric=="security_hotspots") | .value // "0"')
+          # Parse metrics from JSON structure
+          MEASURES=$(echo "$FULL_RESULTS" | jq -r '.metrics')
+          ISSUES=$(echo "$FULL_RESULTS" | jq -r '.issues_detailed')
+          QG_STATUS=$(echo "$FULL_RESULTS" | jq -r '.quality_gate')
+          THRESHOLD_INFO=$(echo "$FULL_RESULTS" | jq -r '.threshold_check')
+          
+          # Extract metric values from new JSON structure
+          BUGS=$(echo "$MEASURES" | jq -r '.bugs.value // "0"')
+          VULNERABILITIES=$(echo "$MEASURES" | jq -r '.vulnerabilities.value // "0"')
+          CODE_SMELLS=$(echo "$MEASURES" | jq -r '.code_smells.value // "0"')
+          COVERAGE=$(echo "$MEASURES" | jq -r '.coverage.value // "N/A"')
+          DUPLICATIONS=$(echo "$MEASURES" | jq -r '.duplications.value // "N/A"')
+          HOTSPOTS=$(echo "$MEASURES" | jq -r '.security_hotspots.value // "0"')
+          
+          # Extract thresholds
+          BUGS_THRESHOLD=$(echo "$MEASURES" | jq -r '.bugs.threshold // "0"')
+          VULN_THRESHOLD=$(echo "$MEASURES" | jq -r '.vulnerabilities.threshold // "0"')
+          SMELLS_THRESHOLD=$(echo "$MEASURES" | jq -r '.code_smells.threshold // "0"')
+          COVERAGE_THRESHOLD=$(echo "$MEASURES" | jq -r '.coverage.threshold // "0"')
+          DUP_THRESHOLD=$(echo "$MEASURES" | jq -r '.duplications.threshold // "0"')
           
           # Quality Gate status
-          QG_RESULT=$(echo "$QG_STATUS" | jq -r '.projectStatus.status // "UNKNOWN"')
+          QG_RESULT=$(echo "$QG_STATUS" | jq -r '.status // "UNKNOWN"')
+          
+          # Threshold exceeded status
+          THRESHOLD_EXCEEDED=$(echo "$THRESHOLD_INFO" | jq -r '.exceeded // "false"')
+          THRESHOLD_VIOLATIONS=$(echo "$THRESHOLD_INFO" | jq -r '.violations // []')
           
           # Start building the summary
           cat > summary.md << 'HEADER'
@@ -154,10 +430,14 @@ jobs:
           
           HEADER
           
-          if [ "$QG_RESULT" = "OK" ]; then
+          if [ "$QG_RESULT" = "OK" ] && [ "$THRESHOLD_EXCEEDED" = "false" ]; then
             echo "### Quality Gate: ✅ PASSED" >> summary.md
           else
             echo "### Quality Gate: ❌ FAILED" >> summary.md
+            if [ "$THRESHOLD_EXCEEDED" = "true" ]; then
+              echo "" >> summary.md
+              echo "⚠️ **Threshold Violations Detected**" >> summary.md
+            fi
           fi
           
           cat >> summary.md << METRICS
@@ -167,21 +447,21 @@ jobs:
           
           ---
           
-          ### 📊 Code Quality Metrics
+          ### 📊 Code Quality Metrics (with Thresholds)
           
-          | Metric | Value |
-          |--------|-------|
-          | 🐛 Bugs | ${BUGS} |
-          | 🔒 Vulnerabilities | ${VULNERABILITIES} |
-          | 💡 Code Smells | ${CODE_SMELLS} |
-          | 🔥 Security Hotspots | ${HOTSPOTS} |
-          | 📈 Coverage | ${COVERAGE}% |
-          | 📋 Duplications | ${DUPLICATIONS}% |
+          | Metric | Value | Threshold | Status |
+          |--------|-------|-----------|--------|
+          | 🐛 Bugs | ${BUGS} | ≤ ${BUGS_THRESHOLD} | $(if [ "$BUGS" -le "$BUGS_THRESHOLD" ]; then echo "✅"; else echo "❌"; fi) |
+          | 🔒 Vulnerabilities | ${VULNERABILITIES} | ≤ ${VULN_THRESHOLD} | $(if [ "$VULNERABILITIES" -le "$VULN_THRESHOLD" ]; then echo "✅"; else echo "❌"; fi) |
+          | 💡 Code Smells | ${CODE_SMELLS} | ≤ ${SMELLS_THRESHOLD} | $(if [ "$CODE_SMELLS" -le "$SMELLS_THRESHOLD" ]; then echo "✅"; else echo "❌"; fi) |
+          | 🔥 Security Hotspots | ${HOTSPOTS} | ≤ 0 | $(if [ "$HOTSPOTS" -le "0" ]; then echo "✅"; else echo "❌"; fi) |
+          | 📈 Coverage | ${COVERAGE}% | ≥ ${COVERAGE_THRESHOLD}% | $(if (( $(echo "$COVERAGE >= $COVERAGE_THRESHOLD" | bc -l) )); then echo "✅"; else echo "❌"; fi) |
+          | 📋 Duplications | ${DUPLICATIONS}% | ≤ ${DUP_THRESHOLD}% | $(if (( $(echo "$DUPLICATIONS <= $DUP_THRESHOLD" | bc -l) )); then echo "✅"; else echo "❌"; fi) |
           
           METRICS
           
           # Parse and display issues if quality gate failed
-          ISSUE_COUNT=$(echo "$ISSUES" | jq -r '.total // 0')
+          ISSUE_COUNT=$(echo "$ISSUES" | jq 'length')
           
           if [ "$ISSUE_COUNT" -gt 0 ]; then
             cat >> summary.md << 'ISSUES_HEADER'
@@ -192,11 +472,11 @@ jobs:
           
           ISSUES_HEADER
             
-            # Group issues by severity
-            BLOCKER_COUNT=$(echo "$ISSUES" | jq '[.issues[] | select(.severity=="BLOCKER")] | length')
-            CRITICAL_COUNT=$(echo "$ISSUES" | jq '[.issues[] | select(.severity=="CRITICAL")] | length')
-            MAJOR_COUNT=$(echo "$ISSUES" | jq '[.issues[] | select(.severity=="MAJOR")] | length')
-            MINOR_COUNT=$(echo "$ISSUES" | jq '[.issues[] | select(.severity=="MINOR")] | length')
+            # Group issues by severity from detailed array
+            BLOCKER_COUNT=$(echo "$ISSUES" | jq '[.[] | select(.severity=="BLOCKER")] | length')
+            CRITICAL_COUNT=$(echo "$ISSUES" | jq '[.[] | select(.severity=="CRITICAL")] | length')
+            MAJOR_COUNT=$(echo "$ISSUES" | jq '[.[] | select(.severity=="MAJOR")] | length')
+            MINOR_COUNT=$(echo "$ISSUES" | jq '[.[] | select(.severity=="MINOR")] | length')
             
             cat >> summary.md << ISSUE_SUMMARY
           **Total Issues:** ${ISSUE_COUNT}
@@ -208,7 +488,7 @@ jobs:
           ISSUE_SUMMARY
             
             # Display top issues (limit to 20 for PR comment readability)
-            echo "$ISSUES" | jq -r '.issues[:20] | .[] | 
+            echo "$ISSUES" | jq -r '.[:20] | .[] |
             "#### " + (if .severity == "BLOCKER" then "🔴" elif .severity == "CRITICAL" then "🟠" elif .severity == "MAJOR" then "🟡" else "🔵" end) + " " + .severity + " - " + (.type | gsub("_"; " ")) + "\n" +
             "**Message:** " + .message + "\n" +
             "**File:** `" + .component + "`\n" +
