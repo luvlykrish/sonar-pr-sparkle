@@ -1,0 +1,143 @@
+name: SonarQube Results Consumer Example
+
+on:
+  workflow_run:
+    workflows: ["SonarQube PR Scan"]
+    types:
+      - completed
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  consume-sonarqube-results:
+    name: Process SonarQube JSON Output
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success' || github.event.workflow_run.conclusion == 'failure'
+    
+    steps:
+      - name: Download SonarQube Results Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: sonarqube-results
+          path: sonar-results/
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+          
+      - name: Parse and Use JSON Results
+        id: parse-results
+        run: |
+          # Install jq
+          sudo apt-get update && sudo apt-get install -y jq
+          
+          # Load the JSON results
+          RESULTS=$(cat sonar-results/sonar-results.json)
+          
+          echo "=== CONSUMING SONARQUBE RESULTS ==="
+          echo ""
+          
+          # Extract key information
+          PROJECT=$(echo "$RESULTS" | jq -r '.scan_metadata.project_key')
+          PR_NUMBER=$(echo "$RESULTS" | jq -r '.scan_metadata.pull_request')
+          QG_STATUS=$(echo "$RESULTS" | jq -r '.quality_gate.status')
+          THRESHOLD_EXCEEDED=$(echo "$RESULTS" | jq -r '.threshold_check.exceeded')
+          
+          echo "Project: $PROJECT"
+          echo "PR: #$PR_NUMBER"
+          echo "Quality Gate: $QG_STATUS"
+          echo "Threshold Exceeded: $THRESHOLD_EXCEEDED"
+          echo ""
+          
+          # Check specific metrics against thresholds
+          echo "=== METRIC ANALYSIS ==="
+          
+          # Bugs
+          BUGS_VALUE=$(echo "$RESULTS" | jq -r '.metrics.bugs.value')
+          BUGS_THRESHOLD=$(echo "$RESULTS" | jq -r '.metrics.bugs.threshold')
+          BUGS_EXCEEDED=$(echo "$RESULTS" | jq -r '.metrics.bugs.exceeded')
+          echo "Bugs: $BUGS_VALUE (threshold: $BUGS_THRESHOLD) - Exceeded: $BUGS_EXCEEDED"
+          
+          # Vulnerabilities
+          VULN_VALUE=$(echo "$RESULTS" | jq -r '.metrics.vulnerabilities.value')
+          VULN_THRESHOLD=$(echo "$RESULTS" | jq -r '.metrics.vulnerabilities.threshold')
+          VULN_EXCEEDED=$(echo "$RESULTS" | jq -r '.metrics.vulnerabilities.exceeded')
+          echo "Vulnerabilities: $VULN_VALUE (threshold: $VULN_THRESHOLD) - Exceeded: $VULN_EXCEEDED"
+          
+          # Coverage
+          COVERAGE_VALUE=$(echo "$RESULTS" | jq -r '.metrics.coverage.value')
+          COVERAGE_THRESHOLD=$(echo "$RESULTS" | jq -r '.metrics.coverage.threshold')
+          COVERAGE_EXCEEDED=$(echo "$RESULTS" | jq -r '.metrics.coverage.exceeded')
+          echo "Coverage: $COVERAGE_VALUE% (threshold: $COVERAGE_THRESHOLD%) - Below threshold: $COVERAGE_EXCEEDED"
+          
+          echo ""
+          echo "=== ISSUE SEVERITY BREAKDOWN ==="
+          
+          # Issue counts by severity
+          BLOCKER=$(echo "$RESULTS" | jq -r '.issues_summary.by_severity.blocker.count')
+          CRITICAL=$(echo "$RESULTS" | jq -r '.issues_summary.by_severity.critical.count')
+          MAJOR=$(echo "$RESULTS" | jq -r '.issues_summary.by_severity.major.count')
+          MINOR=$(echo "$RESULTS" | jq -r '.issues_summary.by_severity.minor.count')
+          
+          echo "Blocker: $BLOCKER"
+          echo "Critical: $CRITICAL"
+          echo "Major: $MAJOR"
+          echo "Minor: $MINOR"
+          
+          echo ""
+          echo "=== DETAILED ISSUES (First 5) ==="
+          
+          # Display first 5 detailed issues
+          echo "$RESULTS" | jq -r '.issues_detailed[:5] | .[] | 
+            "---",
+            "Severity: \(.severity)",
+            "Type: \(.type)",
+            "Message: \(.message)",
+            "File: \(.component)",
+            "Line: \(.line // "N/A")",
+            "Rule: \(.rule)",
+            ""'
+          
+          # Example: Make decisions based on thresholds
+          if [ "$THRESHOLD_EXCEEDED" = "true" ]; then
+            echo ""
+            echo "⚠️  THRESHOLD VIOLATIONS DETECTED!"
+            echo "Violations:"
+            echo "$RESULTS" | jq -r '.threshold_check.violations[]'
+            
+            # You can add custom logic here, such as:
+            # - Send notifications
+            # - Block PR merge
+            # - Create Jira tickets
+            # - Send Slack/Teams messages
+            # - Trigger additional workflows
+          fi
+          
+          # Set outputs for subsequent steps
+          echo "threshold_exceeded=$THRESHOLD_EXCEEDED" >> $GITHUB_OUTPUT
+          echo "bugs_count=$BUGS_VALUE" >> $GITHUB_OUTPUT
+          echo "vuln_count=$VULN_VALUE" >> $GITHUB_OUTPUT
+          
+      - name: Custom Actions Based on Results
+        if: steps.parse-results.outputs.threshold_exceeded == 'true'
+        run: |
+          echo "🚨 Taking action because thresholds were exceeded!"
+          
+          # Example custom actions:
+          # 1. Send notification
+          echo "Sending notification about threshold violations..."
+          
+          # 2. Create detailed report
+          echo "Creating detailed remediation report..."
+          
+          # 3. Update external systems
+          echo "Updating project tracking system..."
+          
+          # Add your custom logic here based on the JSON data
+          
+      - name: Success Actions
+        if: steps.parse-results.outputs.threshold_exceeded == 'false'
+        run: |
+          echo "✅ All quality gates passed! Code meets all threshold requirements."
+          
+          # Add success-specific actions here
