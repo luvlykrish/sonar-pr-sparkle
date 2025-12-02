@@ -96,29 +96,74 @@ jobs:
           name: sonarqube-results
           path: sonar-results/
           
-      - name: Fetch SonarQube metrics
+      - name: Fetch SonarQube metrics and issues
         id: fetch-metrics
         run: |
           PROJECT_KEY="${{ github.repository_owner }}_${{ github.event.repository.name }}"
+          PR_NUMBER="${{ github.event.pull_request.number }}"
           
           # Fetch measures from SonarQube API
-          RESPONSE=$(curl -s -u "${{ secrets.SONAR_TOKEN }}:" \
-            "${{ secrets.SONAR_HOST_URL }}/api/measures/component?component=${PROJECT_KEY}&metricKeys=bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density,security_hotspots,reliability_rating,security_rating,sqale_rating")
+          MEASURES=$(curl -s -u "${{ secrets.SONAR_TOKEN }}:" \
+            "${{ secrets.SONAR_HOST_URL }}/api/measures/component?component=${PROJECT_KEY}&metricKeys=bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density,security_hotspots,reliability_rating,security_rating,sqale_rating&pullRequest=${PR_NUMBER}")
           
-          echo "sonar_response<<EOF" >> $GITHUB_OUTPUT
-          echo "$RESPONSE" >> $GITHUB_OUTPUT
+          # Fetch detailed issues (bugs, vulnerabilities, code smells)
+          ISSUES=$(curl -s -u "${{ secrets.SONAR_TOKEN }}:" \
+            "${{ secrets.SONAR_HOST_URL }}/api/issues/search?componentKeys=${PROJECT_KEY}&pullRequest=${PR_NUMBER}&resolved=false&statuses=OPEN,CONFIRMED,REOPENED&ps=100")
+          
+          # Fetch quality gate status
+          QG_STATUS=$(curl -s -u "${{ secrets.SONAR_TOKEN }}:" \
+            "${{ secrets.SONAR_HOST_URL }}/api/qualitygates/project_status?projectKey=${PROJECT_KEY}&pullRequest=${PR_NUMBER}")
+          
+          echo "measures<<EOF" >> $GITHUB_OUTPUT
+          echo "$MEASURES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+          echo "issues<<EOF" >> $GITHUB_OUTPUT
+          echo "$ISSUES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+          echo "quality_gate<<EOF" >> $GITHUB_OUTPUT
+          echo "$QG_STATUS" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
           
       - name: Parse and summarize results
         id: summarize
         run: |
-          cat > summary.md << 'EOF'
+          # Install jq for JSON parsing
+          sudo apt-get update && sudo apt-get install -y jq
+          
+          # Parse metrics
+          MEASURES='${{ steps.fetch-metrics.outputs.measures }}'
+          ISSUES='${{ steps.fetch-metrics.outputs.issues }}'
+          QG_STATUS='${{ steps.fetch-metrics.outputs.quality_gate }}'
+          
+          # Extract metric values
+          BUGS=$(echo "$MEASURES" | jq -r '.component.measures[] | select(.metric=="bugs") | .value // "0"')
+          VULNERABILITIES=$(echo "$MEASURES" | jq -r '.component.measures[] | select(.metric=="vulnerabilities") | .value // "0"')
+          CODE_SMELLS=$(echo "$MEASURES" | jq -r '.component.measures[] | select(.metric=="code_smells") | .value // "0"')
+          COVERAGE=$(echo "$MEASURES" | jq -r '.component.measures[] | select(.metric=="coverage") | .value // "N/A"')
+          DUPLICATIONS=$(echo "$MEASURES" | jq -r '.component.measures[] | select(.metric=="duplicated_lines_density") | .value // "N/A"')
+          HOTSPOTS=$(echo "$MEASURES" | jq -r '.component.measures[] | select(.metric=="security_hotspots") | .value // "0"')
+          
+          # Quality Gate status
+          QG_RESULT=$(echo "$QG_STATUS" | jq -r '.projectStatus.status // "UNKNOWN"')
+          
+          # Start building the summary
+          cat > summary.md << 'HEADER'
           ## 🔍 SonarQube Analysis Results
           
-          ### Quality Gate: ${{ needs.sonarqube-scan.result == 'success' && '✅ PASSED' || '❌ FAILED' }}
+          HEADER
+          
+          if [ "$QG_RESULT" = "OK" ]; then
+            echo "### Quality Gate: ✅ PASSED" >> summary.md
+          else
+            echo "### Quality Gate: ❌ FAILED" >> summary.md
+          fi
+          
+          cat >> summary.md << METRICS
           
           **Pull Request:** #${{ github.event.pull_request.number }}
-          **Branch:** `${{ github.event.pull_request.head.ref }}`
+          **Branch:** \`${{ github.event.pull_request.head.ref }}\`
           
           ---
           
@@ -126,43 +171,89 @@ jobs:
           
           | Metric | Value |
           |--------|-------|
-          | 🐛 Bugs | View in SonarQube |
-          | 🔒 Vulnerabilities | View in SonarQube |
-          | 💡 Code Smells | View in SonarQube |
-          | 🔥 Security Hotspots | View in SonarQube |
-          | 📈 Coverage | View in SonarQube |
-          | 📋 Duplications | View in SonarQube |
+          | 🐛 Bugs | ${BUGS} |
+          | 🔒 Vulnerabilities | ${VULNERABILITIES} |
+          | 💡 Code Smells | ${CODE_SMELLS} |
+          | 🔥 Security Hotspots | ${HOTSPOTS} |
+          | 📈 Coverage | ${COVERAGE}% |
+          | 📋 Duplications | ${DUPLICATIONS}% |
           
-          ### 🎯 Ratings
+          METRICS
           
-          | Category | Rating |
-          |----------|--------|
-          | Reliability | View in SonarQube |
-          | Security | View in SonarQube |
-          | Maintainability | View in SonarQube |
+          # Parse and display issues if quality gate failed
+          ISSUE_COUNT=$(echo "$ISSUES" | jq -r '.total // 0')
+          
+          if [ "$ISSUE_COUNT" -gt 0 ]; then
+            cat >> summary.md << 'ISSUES_HEADER'
+          
+          ---
+          
+          ### 🚨 Issues Found
+          
+          ISSUES_HEADER
+            
+            # Group issues by severity
+            BLOCKER_COUNT=$(echo "$ISSUES" | jq '[.issues[] | select(.severity=="BLOCKER")] | length')
+            CRITICAL_COUNT=$(echo "$ISSUES" | jq '[.issues[] | select(.severity=="CRITICAL")] | length')
+            MAJOR_COUNT=$(echo "$ISSUES" | jq '[.issues[] | select(.severity=="MAJOR")] | length')
+            MINOR_COUNT=$(echo "$ISSUES" | jq '[.issues[] | select(.severity=="MINOR")] | length')
+            
+            cat >> summary.md << ISSUE_SUMMARY
+          **Total Issues:** ${ISSUE_COUNT}
+          - 🔴 Blocker: ${BLOCKER_COUNT}
+          - 🟠 Critical: ${CRITICAL_COUNT}
+          - 🟡 Major: ${MAJOR_COUNT}
+          - 🔵 Minor: ${MINOR_COUNT}
+          
+          ISSUE_SUMMARY
+            
+            # Display top issues (limit to 20 for PR comment readability)
+            echo "$ISSUES" | jq -r '.issues[:20] | .[] | 
+            "#### " + (if .severity == "BLOCKER" then "🔴" elif .severity == "CRITICAL" then "🟠" elif .severity == "MAJOR" then "🟡" else "🔵" end) + " " + .severity + " - " + (.type | gsub("_"; " ")) + "\n" +
+            "**Message:** " + .message + "\n" +
+            "**File:** `" + .component + "`\n" +
+            (if .line then "**Line:** " + (.line | tostring) + "\n" else "" end) +
+            (if .rule then "**Rule:** " + .rule + "\n" else "" end) +
+            "\n---\n"' >> summary.md
+            
+            if [ "$ISSUE_COUNT" -gt 20 ]; then
+              REMAINING=$((ISSUE_COUNT - 20))
+              echo "" >> summary.md
+              echo "> **Note:** Showing top 20 issues. ${REMAINING} more issues found. View full report in SonarQube." >> summary.md
+            fi
+          fi
+          
+          # Add links section
+          cat >> summary.md << FOOTER
           
           ---
           
           ### 🔗 Links
           
-          - [View Full Report in SonarQube](${{ secrets.SONAR_HOST_URL }}/dashboard?id=${{ github.repository_owner }}_${{ github.event.repository.name }}&pullRequest=${{ github.event.pull_request.number }})
-          - [Quality Gate Details](${{ secrets.SONAR_HOST_URL }}/project/quality_gate?id=${{ github.repository_owner }}_${{ github.event.repository.name }})
+          - [📊 View Full Report in SonarQube](${{ secrets.SONAR_HOST_URL }}/dashboard?id=${{ github.repository_owner }}_${{ github.event.repository.name }}&pullRequest=${{ github.event.pull_request.number }})
+          - [🎯 Quality Gate Details](${{ secrets.SONAR_HOST_URL }}/project/quality_gate?id=${{ github.repository_owner }}_${{ github.event.repository.name }})
+          - [🐛 All Issues](${{ secrets.SONAR_HOST_URL }}/project/issues?id=${{ github.repository_owner }}_${{ github.event.repository.name }}&pullRequest=${{ github.event.pull_request.number }})
           
           ---
           
           <details>
           <summary>📝 View Raw Analysis Data</summary>
           
-          ```json
-          ${{ steps.fetch-metrics.outputs.sonar_response }}
-          ```
+          **Measures:**
+          \`\`\`json
+          ${MEASURES}
+          \`\`\`
+          
+          **Quality Gate:**
+          \`\`\`json
+          ${QG_STATUS}
+          \`\`\`
           
           </details>
-          
-          > **Note:** Click on the SonarQube link above to see detailed metrics and code issues.
-          EOF
+          FOOTER
           
           echo "summary_created=true" >> $GITHUB_OUTPUT
+          echo "issue_count=${ISSUE_COUNT}" >> $GITHUB_OUTPUT
           
       - name: Comment PR with results
         uses: actions/github-script@v7
@@ -202,14 +293,31 @@ jobs:
               });
             }
             
-      - name: Create Check Run
+      - name: Create Check Run with Detailed Output
         uses: actions/github-script@v7
         if: always()
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            const fs = require('fs');
             const qualityGateStatus = '${{ needs.sonarqube-scan.result }}';
             const conclusion = qualityGateStatus === 'success' ? 'success' : 'failure';
+            const issueCount = '${{ steps.summarize.outputs.issue_count }}' || '0';
+            
+            // Read the full summary for detailed output
+            let detailedText = '';
+            try {
+              detailedText = fs.readFileSync('summary.md', 'utf8');
+            } catch (error) {
+              detailedText = `View detailed results at: ${{ secrets.SONAR_HOST_URL }}/dashboard?id=${{ github.repository_owner }}_${{ github.event.repository.name }}&pullRequest=${{ github.event.pull_request.number }}`;
+            }
+            
+            let summaryText = '';
+            if (conclusion === 'success') {
+              summaryText = '✅ All quality checks passed! No critical issues found.';
+            } else {
+              summaryText = `❌ Quality Gate failed with ${issueCount} issue(s) found. Please review and fix the issues below.`;
+            }
             
             await github.rest.checks.create({
               owner: context.repo.owner,
@@ -220,8 +328,8 @@ jobs:
               conclusion: conclusion,
               output: {
                 title: `Quality Gate ${conclusion === 'success' ? 'Passed ✅' : 'Failed ❌'}`,
-                summary: `SonarQube analysis completed with status: ${conclusion}`,
-                text: `View detailed results at: ${{ secrets.SONAR_HOST_URL }}/dashboard?id=${{ github.repository_owner }}_${{ github.event.repository.name }}&pullRequest=${{ github.event.pull_request.number }}`
+                summary: summaryText,
+                text: detailedText
               }
             });
             
