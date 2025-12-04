@@ -1,0 +1,597 @@
+name: OpenAI Code Review
+
+on:
+  workflow_run:
+    workflows: ["SonarQube PR Scan"]
+    types:
+      - completed
+
+env:
+  OPENAI_MODEL: "gpt-4o"
+
+jobs:
+  ai-code-review:
+    name: AI Code Review
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Get PR Information
+        id: pr-info
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const headSha = context.payload.workflow_run.head_sha;
+            
+            // Find the PR associated with this commit
+            const prs = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              head: `${context.repo.owner}:${context.payload.workflow_run.head_branch}`
+            });
+            
+            if (prs.data.length === 0) {
+              core.setFailed('No open PR found for this workflow run');
+              return;
+            }
+            
+            const pr = prs.data[0];
+            
+            // Get PR diff
+            const diff = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+              mediaType: { format: 'diff' }
+            });
+            
+            // Get PR files
+            const files = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+              per_page: 100
+            });
+            
+            // Get linked issues from PR body
+            const issuePattern = /#(\d+)|([A-Z]+-\d+)/g;
+            const linkedIssues = [];
+            const body = pr.body || '';
+            let match;
+            while ((match = issuePattern.exec(body)) !== null) {
+              linkedIssues.push(match[0]);
+            }
+            
+            core.setOutput('pr_number', pr.number);
+            core.setOutput('pr_title', pr.title);
+            core.setOutput('pr_body', pr.body || '');
+            core.setOutput('pr_author', pr.user.login);
+            core.setOutput('base_branch', pr.base.ref);
+            core.setOutput('head_branch', pr.head.ref);
+            core.setOutput('diff', diff.data);
+            core.setOutput('files_changed', JSON.stringify(files.data.map(f => ({
+              filename: f.filename,
+              status: f.status,
+              additions: f.additions,
+              deletions: f.deletions,
+              patch: f.patch || ''
+            }))));
+            core.setOutput('linked_issues', JSON.stringify(linkedIssues));
+            
+            return pr.number;
+
+      - name: Download SonarQube Results
+        uses: actions/download-artifact@v4
+        with:
+          name: sonarqube-results
+          path: ./sonar-results
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+      - name: Perform AI Code Review
+        id: ai-review
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          # Create the prompt for OpenAI
+          cat > /tmp/review_prompt.txt << 'PROMPT_END'
+          You are an expert code reviewer. Analyze the following Pull Request and provide a comprehensive review.
+
+          ## Your Task
+          
+          Detect and explain:
+          1. Bug risks and logical errors
+          2. Design and architectural issues
+          3. Code quality and readability issues
+          4. Performance and scalability issues
+          5. Deviations from coding standards (clean code, SOLID, secure coding, idiomatic style, consistent formatting)
+
+          ## Required Output Format
+
+          Produce your review in the following JSON structure:
+          
+          {
+            "pr_summary": {
+              "overview": "Concise high-level summary of what the PR changes and why",
+              "impact": "Behavior and impact description",
+              "affected_components": ["list", "of", "key", "modules/services/components"],
+              "change_type": "feature|bugfix|refactor|docs|test|chore"
+            },
+            "review_guide": {
+              "themes": [
+                {
+                  "name": "Theme name (e.g., Authentication changes)",
+                  "description": "What changed and the intent",
+                  "relevant_files": ["file1.ts", "file2.ts"],
+                  "risks": ["Risk 1", "Risk 2"],
+                  "edge_cases": ["Edge case 1"]
+                }
+              ]
+            },
+            "linked_issue_analysis": {
+              "referenced_issues": ["#123", "JIRA-456"],
+              "coverage_assessment": "Assessment of whether code addresses the issues",
+              "gaps": ["Gap 1", "Gap 2"],
+              "additional_risks": ["Risk 1"]
+            },
+            "code_issues": [
+              {
+                "type": "bug|design|quality|performance|security|standards",
+                "severity": "critical|high|medium|low|info",
+                "file": "path/to/file.ts",
+                "line": 42,
+                "title": "Brief issue title",
+                "description": "Why this is a problem",
+                "suggestion": "Concrete improvement or alternative",
+                "code_snippet": "relevant code if applicable"
+              }
+            ],
+            "strengths": [
+              "Positive aspect 1",
+              "Positive aspect 2"
+            ],
+            "overall_score": {
+              "code_quality": 85,
+              "security": 90,
+              "performance": 80,
+              "maintainability": 85,
+              "test_coverage_indication": 70
+            },
+            "recommendation": "approve|request_changes|comment",
+            "summary_comment": "One paragraph summary for PR comment"
+          }
+
+          ## Rules
+          - Be explicit, structured, and actionable
+          - When mentioning a problem, always explain WHY and propose a concrete fix
+          - Never invent files or changes not in the diff
+          - Acknowledge strengths where code is good
+          - Focus on behavior and impact, not line-by-line commentary
+          PROMPT_END
+
+          # Prepare PR context
+          PR_TITLE="${{ steps.pr-info.outputs.pr_title }}"
+          PR_BODY="${{ steps.pr-info.outputs.pr_body }}"
+          PR_AUTHOR="${{ steps.pr-info.outputs.pr_author }}"
+          BASE_BRANCH="${{ steps.pr-info.outputs.base_branch }}"
+          HEAD_BRANCH="${{ steps.pr-info.outputs.head_branch }}"
+          LINKED_ISSUES='${{ steps.pr-info.outputs.linked_issues }}'
+          
+          # Get files changed (truncate if too large)
+          FILES_CHANGED='${{ steps.pr-info.outputs.files_changed }}'
+          
+          # Read SonarQube results if available
+          SONAR_CONTEXT=""
+          if [ -f "./sonar-results/sonar-results.json" ]; then
+            SONAR_CONTEXT=$(cat ./sonar-results/sonar-results.json | head -c 5000)
+          fi
+          
+          # Create the full prompt with context
+          cat > /tmp/full_prompt.json << EOF
+          {
+            "model": "${OPENAI_MODEL}",
+            "messages": [
+              {
+                "role": "system",
+                "content": $(cat /tmp/review_prompt.txt | jq -Rs .)
+              },
+              {
+                "role": "user",
+                "content": $(cat << CONTEXT_END | jq -Rs .
+          ## Pull Request Information
+
+          **Title:** ${PR_TITLE}
+          **Author:** ${PR_AUTHOR}
+          **Base Branch:** ${BASE_BRANCH}
+          **Head Branch:** ${HEAD_BRANCH}
+          **Linked Issues:** ${LINKED_ISSUES}
+
+          **Description:**
+          ${PR_BODY}
+
+          ## SonarQube Analysis Results
+          ${SONAR_CONTEXT:-"No SonarQube results available"}
+
+          ## Files Changed
+          ${FILES_CHANGED}
+
+          ## Code Diff
+          $(echo '${{ steps.pr-info.outputs.diff }}' | head -c 50000)
+          CONTEXT_END
+          )
+              }
+            ],
+            "temperature": 0.3,
+            "max_tokens": 4000,
+            "response_format": { "type": "json_object" }
+          }
+          EOF
+
+          # Call OpenAI API
+          RESPONSE=$(curl -s -X POST "https://api.openai.com/v1/chat/completions" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${OPENAI_API_KEY}" \
+            -d @/tmp/full_prompt.json)
+          
+          # Extract the content from the response
+          AI_REVIEW=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // empty')
+          
+          if [ -z "$AI_REVIEW" ]; then
+            echo "Error: Failed to get AI review"
+            echo "$RESPONSE" | jq .
+            exit 1
+          fi
+          
+          # Save the review
+          echo "$AI_REVIEW" > ai-review.json
+          
+          # Output for later steps
+          echo "review<<EOF" >> $GITHUB_OUTPUT
+          echo "$AI_REVIEW" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Generate Review Report
+        id: report
+        run: |
+          # Parse AI review JSON
+          REVIEW=$(cat ai-review.json)
+          
+          # Extract sections
+          PR_SUMMARY=$(echo "$REVIEW" | jq -r '.pr_summary')
+          REVIEW_GUIDE=$(echo "$REVIEW" | jq -r '.review_guide')
+          ISSUE_ANALYSIS=$(echo "$REVIEW" | jq -r '.linked_issue_analysis')
+          CODE_ISSUES=$(echo "$REVIEW" | jq -r '.code_issues')
+          STRENGTHS=$(echo "$REVIEW" | jq -r '.strengths')
+          SCORES=$(echo "$REVIEW" | jq -r '.overall_score')
+          RECOMMENDATION=$(echo "$REVIEW" | jq -r '.recommendation')
+          
+          # Create markdown report
+          cat > ai-review-report.md << 'REPORT_START'
+          # 🤖 AI Code Review Report
+          
+          REPORT_START
+          
+          # Add PR Summary Section
+          cat >> ai-review-report.md << SUMMARY_SECTION
+          ## 📋 PR Summary
+          
+          **Overview:** $(echo "$REVIEW" | jq -r '.pr_summary.overview')
+          
+          **Impact:** $(echo "$REVIEW" | jq -r '.pr_summary.impact')
+          
+          **Change Type:** \`$(echo "$REVIEW" | jq -r '.pr_summary.change_type')\`
+          
+          **Affected Components:**
+          $(echo "$REVIEW" | jq -r '.pr_summary.affected_components[]' | sed 's/^/- /')
+          
+          ---
+          
+          ## 📖 Review Guide
+          
+          SUMMARY_SECTION
+          
+          # Add themes
+          echo "$REVIEW" | jq -r '.review_guide.themes[] | "### " + .name + "\n\n**What Changed:** " + .description + "\n\n**Relevant Files:**\n" + (.relevant_files | map("- `" + . + "`") | join("\n")) + "\n\n**Risks:**\n" + (.risks | map("- ⚠️ " + .) | join("\n")) + "\n\n**Edge Cases:**\n" + (.edge_cases | map("- 🔍 " + .) | join("\n")) + "\n"' >> ai-review-report.md
+          
+          # Add Linked Issue Analysis
+          cat >> ai-review-report.md << ISSUE_SECTION
+          
+          ---
+          
+          ## 🔗 Linked Issue Analysis
+          
+          **Referenced Issues:** $(echo "$REVIEW" | jq -r '.linked_issue_analysis.referenced_issues | join(", ")')
+          
+          **Coverage Assessment:** $(echo "$REVIEW" | jq -r '.linked_issue_analysis.coverage_assessment')
+          
+          **Gaps Identified:**
+          $(echo "$REVIEW" | jq -r '.linked_issue_analysis.gaps[]' 2>/dev/null | sed 's/^/- ❌ /' || echo "- None identified")
+          
+          **Additional Risks:**
+          $(echo "$REVIEW" | jq -r '.linked_issue_analysis.additional_risks[]' 2>/dev/null | sed 's/^/- ⚠️ /' || echo "- None identified")
+          
+          ---
+          
+          ## 🐛 Code Issues Found
+          
+          ISSUE_SECTION
+          
+          # Add code issues table
+          ISSUE_COUNT=$(echo "$REVIEW" | jq '.code_issues | length')
+          
+          if [ "$ISSUE_COUNT" -gt 0 ]; then
+            echo "| Severity | Type | File | Issue | Suggestion |" >> ai-review-report.md
+            echo "|----------|------|------|-------|------------|" >> ai-review-report.md
+            
+            echo "$REVIEW" | jq -r '.code_issues[] | "| " + (if .severity == "critical" then "🔴 Critical" elif .severity == "high" then "🟠 High" elif .severity == "medium" then "🟡 Medium" else "🟢 Low" end) + " | " + .type + " | `" + .file + ":" + (.line | tostring) + "` | " + .title + " | " + .suggestion + " |"' >> ai-review-report.md
+            
+            # Add detailed issues
+            echo "" >> ai-review-report.md
+            echo "### Detailed Issues" >> ai-review-report.md
+            echo "" >> ai-review-report.md
+            
+            echo "$REVIEW" | jq -r '.code_issues[] | "#### " + (if .severity == "critical" then "🔴" elif .severity == "high" then "🟠" elif .severity == "medium" then "🟡" else "🟢" end) + " " + .title + "\n\n**File:** `" + .file + "` (Line " + (.line | tostring) + ")\n**Type:** " + .type + " | **Severity:** " + .severity + "\n\n**Problem:** " + .description + "\n\n**Suggestion:** " + .suggestion + "\n"' >> ai-review-report.md
+          else
+            echo "✅ No significant issues found!" >> ai-review-report.md
+          fi
+          
+          # Add strengths
+          cat >> ai-review-report.md << STRENGTHS_SECTION
+          
+          ---
+          
+          ## ✨ Strengths
+          
+          $(echo "$REVIEW" | jq -r '.strengths[]' | sed 's/^/- ✅ /')
+          
+          ---
+          
+          ## 📊 Quality Scores
+          
+          | Metric | Score |
+          |--------|-------|
+          | Code Quality | $(echo "$REVIEW" | jq -r '.overall_score.code_quality')% |
+          | Security | $(echo "$REVIEW" | jq -r '.overall_score.security')% |
+          | Performance | $(echo "$REVIEW" | jq -r '.overall_score.performance')% |
+          | Maintainability | $(echo "$REVIEW" | jq -r '.overall_score.maintainability')% |
+          | Test Coverage Indication | $(echo "$REVIEW" | jq -r '.overall_score.test_coverage_indication')% |
+          
+          ---
+          
+          ## 🎯 Recommendation
+          
+          STRENGTHS_SECTION
+          
+          # Add recommendation badge
+          RECOMMENDATION=$(echo "$REVIEW" | jq -r '.recommendation')
+          case "$RECOMMENDATION" in
+            "approve")
+              echo "### ✅ APPROVE" >> ai-review-report.md
+              ;;
+            "request_changes")
+              echo "### ❌ REQUEST CHANGES" >> ai-review-report.md
+              ;;
+            *)
+              echo "### 💬 COMMENT" >> ai-review-report.md
+              ;;
+          esac
+          
+          echo "" >> ai-review-report.md
+          echo "$(echo "$REVIEW" | jq -r '.summary_comment')" >> ai-review-report.md
+          
+          # Add footer
+          cat >> ai-review-report.md << 'FOOTER'
+          
+          ---
+          
+          <sub>🤖 This review was generated by AI. Please verify suggestions before implementing.</sub>
+          FOOTER
+          
+          echo "Report generated successfully"
+          cat ai-review-report.md
+
+      - name: Export JSON Results
+        id: export-json
+        run: |
+          # Create comprehensive JSON output for downstream consumption
+          REVIEW=$(cat ai-review.json)
+          PR_NUMBER="${{ steps.pr-info.outputs.pr_number }}"
+          
+          # Build final export JSON
+          jq -n \
+            --arg pr_number "$PR_NUMBER" \
+            --arg pr_title "${{ steps.pr-info.outputs.pr_title }}" \
+            --arg pr_author "${{ steps.pr-info.outputs.pr_author }}" \
+            --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg model "${OPENAI_MODEL}" \
+            --argjson review "$REVIEW" \
+            '{
+              "metadata": {
+                "pr_number": ($pr_number | tonumber),
+                "pr_title": $pr_title,
+                "pr_author": $pr_author,
+                "review_timestamp": $timestamp,
+                "ai_model": $model,
+                "review_type": "comprehensive"
+              },
+              "pr_summary": $review.pr_summary,
+              "review_guide": $review.review_guide,
+              "linked_issue_analysis": $review.linked_issue_analysis,
+              "code_issues": $review.code_issues,
+              "strengths": $review.strengths,
+              "overall_score": $review.overall_score,
+              "recommendation": $review.recommendation,
+              "summary_comment": $review.summary_comment,
+              "issues_summary": {
+                "total": ($review.code_issues | length),
+                "by_severity": {
+                  "critical": ([$review.code_issues[] | select(.severity == "critical")] | length),
+                  "high": ([$review.code_issues[] | select(.severity == "high")] | length),
+                  "medium": ([$review.code_issues[] | select(.severity == "medium")] | length),
+                  "low": ([$review.code_issues[] | select(.severity == "low")] | length),
+                  "info": ([$review.code_issues[] | select(.severity == "info")] | length)
+                },
+                "by_type": {
+                  "bug": ([$review.code_issues[] | select(.type == "bug")] | length),
+                  "design": ([$review.code_issues[] | select(.type == "design")] | length),
+                  "quality": ([$review.code_issues[] | select(.type == "quality")] | length),
+                  "performance": ([$review.code_issues[] | select(.type == "performance")] | length),
+                  "security": ([$review.code_issues[] | select(.type == "security")] | length),
+                  "standards": ([$review.code_issues[] | select(.type == "standards")] | length)
+                }
+              }
+            }' > ai-review-results.json
+          
+          # Set outputs
+          echo "ai-review-json=$(cat ai-review-results.json | base64 -w 0)" >> $GITHUB_OUTPUT
+          echo "recommendation=$(echo "$REVIEW" | jq -r '.recommendation')" >> $GITHUB_OUTPUT
+          echo "issues-count=$(echo "$REVIEW" | jq '.code_issues | length')" >> $GITHUB_OUTPUT
+
+      - name: Upload AI Review Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-code-review
+          path: |
+            ai-review.json
+            ai-review-results.json
+            ai-review-report.md
+          retention-days: 30
+
+      - name: Post Review Comment to PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const prNumber = ${{ steps.pr-info.outputs.pr_number }};
+            const report = fs.readFileSync('ai-review-report.md', 'utf8');
+            
+            // Check for existing AI review comment
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber
+            });
+            
+            const existingComment = comments.data.find(c => 
+              c.body.includes('🤖 AI Code Review Report') && 
+              c.user.type === 'Bot'
+            );
+            
+            if (existingComment) {
+              // Update existing comment
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingComment.id,
+                body: report
+              });
+              console.log('Updated existing AI review comment');
+            } else {
+              // Create new comment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body: report
+              });
+              console.log('Created new AI review comment');
+            }
+
+      - name: Create Check Run
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const review = JSON.parse(fs.readFileSync('ai-review-results.json', 'utf8'));
+            const report = fs.readFileSync('ai-review-report.md', 'utf8');
+            
+            const recommendation = review.recommendation;
+            const issueCount = review.issues_summary.total;
+            const criticalCount = review.issues_summary.by_severity.critical;
+            const highCount = review.issues_summary.by_severity.high;
+            
+            let conclusion = 'success';
+            if (recommendation === 'request_changes' || criticalCount > 0) {
+              conclusion = 'failure';
+            } else if (highCount > 0 || recommendation === 'comment') {
+              conclusion = 'neutral';
+            }
+            
+            await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: 'AI Code Review',
+              head_sha: context.payload.workflow_run.head_sha,
+              status: 'completed',
+              conclusion: conclusion,
+              output: {
+                title: `AI Review: ${recommendation.toUpperCase()} (${issueCount} issues)`,
+                summary: review.summary_comment,
+                text: report
+              }
+            });
+
+    outputs:
+      ai-review-json: ${{ steps.export-json.outputs.ai-review-json }}
+      recommendation: ${{ steps.export-json.outputs.recommendation }}
+      issues-count: ${{ steps.export-json.outputs.issues-count }}
+
+  # Example downstream job that consumes AI review results
+  process-review:
+    name: Process AI Review
+    runs-on: ubuntu-latest
+    needs: ai-code-review
+    if: ${{ always() && needs.ai-code-review.result == 'success' }}
+    
+    steps:
+      - name: Download AI Review Results
+        uses: actions/download-artifact@v4
+        with:
+          name: ai-code-review
+          path: ./ai-review
+
+      - name: Process Review Results
+        run: |
+          echo "=== AI Code Review Results ==="
+          echo ""
+          
+          REVIEW=$(cat ./ai-review/ai-review-results.json)
+          
+          echo "Recommendation: $(echo "$REVIEW" | jq -r '.recommendation')"
+          echo "Total Issues: $(echo "$REVIEW" | jq -r '.issues_summary.total')"
+          echo ""
+          
+          echo "Issues by Severity:"
+          echo "  Critical: $(echo "$REVIEW" | jq -r '.issues_summary.by_severity.critical')"
+          echo "  High: $(echo "$REVIEW" | jq -r '.issues_summary.by_severity.high')"
+          echo "  Medium: $(echo "$REVIEW" | jq -r '.issues_summary.by_severity.medium')"
+          echo "  Low: $(echo "$REVIEW" | jq -r '.issues_summary.by_severity.low')"
+          echo ""
+          
+          echo "Quality Scores:"
+          echo "  Code Quality: $(echo "$REVIEW" | jq -r '.overall_score.code_quality')%"
+          echo "  Security: $(echo "$REVIEW" | jq -r '.overall_score.security')%"
+          echo "  Performance: $(echo "$REVIEW" | jq -r '.overall_score.performance')%"
+          echo "  Maintainability: $(echo "$REVIEW" | jq -r '.overall_score.maintainability')%"
+          echo ""
+          
+          # Decision logic example
+          RECOMMENDATION=$(echo "$REVIEW" | jq -r '.recommendation')
+          CRITICAL=$(echo "$REVIEW" | jq -r '.issues_summary.by_severity.critical')
+          
+          if [ "$RECOMMENDATION" = "request_changes" ] || [ "$CRITICAL" -gt 0 ]; then
+            echo "⚠️ PR requires changes before merge"
+            # Could block merge, send notifications, etc.
+          elif [ "$RECOMMENDATION" = "approve" ]; then
+            echo "✅ PR is approved for merge"
+          else
+            echo "💬 PR needs review attention"
+          fi
