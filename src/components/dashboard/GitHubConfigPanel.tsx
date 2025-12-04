@@ -1,10 +1,11 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { GitHubConfig } from '@/types/codeReview';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Github, Eye, EyeOff, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
+import { Github, Eye, EyeOff, CheckCircle2, AlertCircle, Loader2, Save } from 'lucide-react';
+import { toast } from '@/hooks/use-toast';
 
 interface GitHubConfigPanelProps {
   config: GitHubConfig | null;
@@ -14,18 +15,49 @@ interface GitHubConfigPanelProps {
 }
 
 export function GitHubConfigPanel({ config, onSave, onTest, isLoading }: GitHubConfigPanelProps) {
-  const [token, setToken] = useState(config?.token || '');
-  const [owner, setOwner] = useState(config?.owner || '');
-  const [repo, setRepo] = useState(config?.repo || '');
-  const [webhookSecret, setWebhookSecret] = useState(config?.webhookSecret || '');
+  const [token, setToken] = useState('');
+  const [owner, setOwner] = useState('');
+  const [repo, setRepo] = useState('');
+  const [webhookSecret, setWebhookSecret] = useState('');
   const [showToken, setShowToken] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<'idle' | 'success' | 'error'>('idle');
 
+  // Sync local state with config prop when it changes
+  useEffect(() => {
+    if (config) {
+      setToken(config.token || '');
+      setOwner(config.owner || '');
+      setRepo(config.repo || '');
+      setWebhookSecret(config.webhookSecret || '');
+    }
+  }, [config]);
+
   const handleSave = () => {
+    if (!token || !owner || !repo) {
+      toast({
+        title: "Validation Error",
+        description: "Please fill in all required fields (token, owner, repo)",
+        variant: "destructive",
+      });
+      return;
+    }
     onSave({ token, owner, repo, webhookSecret });
+    toast({
+      title: "Configuration Saved",
+      description: `Settings saved for ${owner}/${repo}`,
+    });
   };
 
   const handleTest = async () => {
+    if (!token || !owner || !repo) {
+      toast({
+        title: "Validation Error",
+        description: "Please fill in all required fields before testing",
+        variant: "destructive",
+      });
+      return;
+    }
+    // Save first, then test
     onSave({ token, owner, repo, webhookSecret });
     const success = await onTest();
     setConnectionStatus(success ? 'success' : 'error');
@@ -133,7 +165,8 @@ export function GitHubConfigPanel({ config, onSave, onTest, isLoading }: GitHubC
             )}
           </Button>
           <Button variant="outline" onClick={handleSave} disabled={!token || !owner || !repo}>
-            Save Configuration
+            <Save className="mr-2 h-4 w-4" />
+            Save
           </Button>
           
           {connectionStatus === 'success' && (
