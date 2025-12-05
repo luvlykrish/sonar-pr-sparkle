@@ -2,10 +2,8 @@ import { useState, useCallback } from 'react';
 import { 
   PullRequest, 
   SonarQubeResults, 
-  AIReviewResult, 
   ThresholdConfig, 
-  DEFAULT_THRESHOLDS,
-  ReviewCommand 
+  DEFAULT_THRESHOLDS 
 } from '@/types/codeReview';
 import { toast } from '@/hooks/use-toast';
 
@@ -13,7 +11,6 @@ interface UseCodeReviewReturn {
   thresholds: ThresholdConfig;
   setThresholds: (thresholds: ThresholdConfig) => void;
   analyzePR: (pr: PullRequest, files: PRFile[]) => Promise<void>;
-  generateAIReview: (pr: PullRequest, command: ReviewCommand) => Promise<AIReviewResult | null>;
   mockSonarResults: (pr: PullRequest) => SonarQubeResults;
   isAnalyzing: boolean;
   analysisProgress: number;
@@ -145,58 +142,10 @@ export function useCodeReview(): UseCodeReviewReturn {
     }
   }, []);
 
-  const generateAIReview = useCallback(async (pr: PullRequest, command: ReviewCommand): Promise<AIReviewResult | null> => {
-    // This would integrate with OpenAI in production
-    // For now, return mock data
-    
-    await new Promise(resolve => setTimeout(resolve, 1500));
-
-    const mockReview: AIReviewResult = {
-      summary: `This pull request introduces ${pr.changedFiles} file changes with ${pr.additions} additions and ${pr.deletions} deletions. The changes appear to focus on ${pr.title.toLowerCase().includes('fix') ? 'bug fixes' : 'feature implementation'}.`,
-      title: `${pr.title.split(':')[0]}: ${pr.title.split(':')[1] || 'Update implementation'}`,
-      guide: `## Review Guide for PR #${pr.number}\n\n### Key Areas to Review\n1. **Logic Changes**: Focus on the core business logic modifications\n2. **Error Handling**: Verify proper error handling is in place\n3. **Test Coverage**: Ensure adequate test coverage for new code\n\n### Files Changed\n${pr.changedFiles} files modified`,
-      suggestions: [
-        {
-          id: '1',
-          type: 'improvement',
-          severity: 'medium',
-          file: 'src/main.ts',
-          line: 42,
-          message: 'Consider extracting this logic into a separate function for better maintainability.',
-          suggestion: 'Extract the validation logic into a dedicated validateInput() function.',
-          status: 'pending',
-        },
-        {
-          id: '2',
-          type: 'security',
-          severity: 'high',
-          file: 'src/api/handler.ts',
-          line: 15,
-          message: 'Input should be sanitized before processing.',
-          suggestion: 'Add input sanitization using a library like DOMPurify or validator.js.',
-          status: 'pending',
-        },
-      ],
-      overallScore: 72 + Math.floor(Math.random() * 20),
-      categories: {
-        codeQuality: 70 + Math.floor(Math.random() * 25),
-        security: 65 + Math.floor(Math.random() * 30),
-        performance: 75 + Math.floor(Math.random() * 20),
-        maintainability: 68 + Math.floor(Math.random() * 25),
-        testability: 60 + Math.floor(Math.random() * 35),
-      },
-      timestamp: new Date().toISOString(),
-      model: 'gpt-4 (mock)',
-    };
-
-    return mockReview;
-  }, []);
-
   return {
     thresholds,
     setThresholds,
     analyzePR,
-    generateAIReview,
     mockSonarResults,
     isAnalyzing,
     analysisProgress,

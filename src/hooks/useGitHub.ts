@@ -12,6 +12,8 @@ interface UseGitHubReturn {
   fetchPullRequest: (prNumber: number) => Promise<PullRequest | null>;
   fetchPRFiles: (prNumber: number) => Promise<PRFile[]>;
   testConnection: () => Promise<boolean>;
+  postPRComment: (prNumber: number, body: string) => Promise<boolean>;
+  mergePR: (prNumber: number, commitTitle?: string) => Promise<boolean>;
 }
 
 interface PRFile {
@@ -223,6 +225,78 @@ export function useGitHub(): UseGitHubReturn {
     }
   }, [config, githubFetch]);
 
+  const postPRComment = useCallback(async (prNumber: number, body: string): Promise<boolean> => {
+    if (!config) return false;
+
+    try {
+      const response = await fetch(`https://api.github.com/repos/${config.owner}/${config.repo}/issues/${prNumber}/comments`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${config.token}`,
+          'Accept': 'application/vnd.github.v3+json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ body }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to post comment: ${response.status}`);
+      }
+
+      toast({
+        title: "Comment Posted",
+        description: `Review posted to PR #${prNumber}`,
+      });
+      return true;
+    } catch (err) {
+      console.error('Failed to post PR comment:', err);
+      toast({
+        title: "Failed to Post Comment",
+        description: err instanceof Error ? err.message : "Unknown error",
+        variant: "destructive",
+      });
+      return false;
+    }
+  }, [config]);
+
+  const mergePR = useCallback(async (prNumber: number, commitTitle?: string): Promise<boolean> => {
+    if (!config) return false;
+
+    try {
+      const response = await fetch(`https://api.github.com/repos/${config.owner}/${config.repo}/pulls/${prNumber}/merge`, {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${config.token}`,
+          'Accept': 'application/vnd.github.v3+json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          commit_title: commitTitle,
+          merge_method: 'squash',
+        }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({}));
+        throw new Error(error.message || `Failed to merge: ${response.status}`);
+      }
+
+      toast({
+        title: "PR Merged",
+        description: `PR #${prNumber} has been merged successfully`,
+      });
+      return true;
+    } catch (err) {
+      console.error('Failed to merge PR:', err);
+      toast({
+        title: "Failed to Merge PR",
+        description: err instanceof Error ? err.message : "Unknown error",
+        variant: "destructive",
+      });
+      return false;
+    }
+  }, [config]);
+
   return {
     config,
     setConfig,
@@ -233,5 +307,7 @@ export function useGitHub(): UseGitHubReturn {
     fetchPullRequest,
     fetchPRFiles,
     testConnection,
+    postPRComment,
+    mergePR,
   };
 }
