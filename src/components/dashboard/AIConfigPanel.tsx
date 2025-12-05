@@ -97,87 +97,76 @@ export function AIConfigPanel({ config, onSave }: AIConfigPanelProps) {
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        {/* Provider Selection */}
-        <div className="space-y-2">
-          <Label>AI Provider</Label>
-          <Select
-            value={localConfig.provider}
-            onValueChange={(v) => handleProviderChange(v as AIProvider)}
-          >
-            <SelectTrigger>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="openai">
-                <span className="flex items-center gap-2">OpenAI</span>
-              </SelectItem>
-              <SelectItem value="anthropic">
-                <span className="flex items-center gap-2">Anthropic</span>
-              </SelectItem>
-              <SelectItem value="google">
-                <span className="flex items-center gap-2">Google AI</span>
-              </SelectItem>
-              <SelectItem value="groq">
-                <span className="flex items-center gap-2">Groq (Free Tier)</span>
-              </SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-
-        {/* Model Selection */}
-        <div className="space-y-2">
-          <Label>Model</Label>
-          <Select
-            value={localConfig.model}
-            onValueChange={(v) => setLocalConfig({ ...localConfig, model: v })}
-          >
-            <SelectTrigger>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {AI_MODELS[localConfig.provider].map((model) => (
-                <SelectItem key={model} value={model}>
-                  {model}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-
-        {/* API Key */}
-        <div className="space-y-2">
-          <Label className="flex items-center gap-2">
-            <Key className="h-4 w-4" />
-            API Key
-          </Label>
-          <div className="relative">
-            <Input
-              type={showApiKey ? "text" : "password"}
-              value={localConfig.apiKey}
-              onChange={(e) => setLocalConfig({ ...localConfig, apiKey: e.target.value })}
-              placeholder={`Enter your ${localConfig.provider} API key`}
-              className="pr-10"
-            />
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="absolute right-0 top-0 h-full px-3"
-              onClick={() => setShowApiKey(!showApiKey)}
+        {/* AI Provider Configuration */}
+        <div className="space-y-3">
+          <div className="space-y-2">
+            <Label>AI Provider</Label>
+            <Select
+              value={localConfig.provider}
+              onValueChange={(v) => handleProviderChange(v as AIProvider)}
             >
-              {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-            </Button>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="openai">OpenAI</SelectItem>
+                <SelectItem value="anthropic">Anthropic</SelectItem>
+                <SelectItem value="google">Google AI</SelectItem>
+                <SelectItem value="groq">Groq (Free Tier)</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
-          <p className="text-xs text-muted-foreground">
-            {localConfig.provider === 'groq' 
-              ? "Groq offers free tier - Get key at console.groq.com"
-              : `Get your API key from ${getProviderUrl(localConfig.provider)}`
-            }
-          </p>
-        </div>
 
-        {/* Options */}
-        <div className="space-y-3 pt-2 border-t border-border">
+          <div className="space-y-2">
+            <Label>Model</Label>
+            <Select
+              value={localConfig.model}
+              onValueChange={(v) => setLocalConfig({ ...localConfig, model: v })}
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {AI_MODELS[localConfig.provider].map((model) => (
+                  <SelectItem key={model} value={model}>
+                    {model}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="space-y-2">
+            <Label className="flex items-center gap-2">
+              <Key className="h-4 w-4" />
+              API Key
+            </Label>
+            <div className="relative">
+              <Input
+                type={showApiKey ? "text" : "password"}
+                value={localConfig.apiKey}
+                onChange={(e) => setLocalConfig({ ...localConfig, apiKey: e.target.value })}
+                placeholder={`Enter your ${localConfig.provider} API key`}
+                className="pr-10"
+              />
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="absolute right-0 top-0 h-full px-3"
+                onClick={() => setShowApiKey(!showApiKey)}
+              >
+                {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {localConfig.provider === 'groq' 
+                ? "Groq offers free tier - Get key at console.groq.com"
+                : `Get your API key from ${getProviderUrl(localConfig.provider)}`
+              }
+            </p>
+          </div>
+
           <div className="flex items-center justify-between">
             <div className="space-y-0.5">
               <Label>Post Reviews to GitHub</Label>
@@ -188,19 +177,6 @@ export function AIConfigPanel({ config, onSave }: AIConfigPanelProps) {
             <Switch
               checked={localConfig.postToGitHub}
               onCheckedChange={(v) => setLocalConfig({ ...localConfig, postToGitHub: v })}
-            />
-          </div>
-
-          <div className="flex items-center justify-between">
-            <div className="space-y-0.5">
-              <Label>Auto-Merge PRs</Label>
-              <p className="text-xs text-muted-foreground">
-                Auto-merge if no major issues found
-              </p>
-            </div>
-            <Switch
-              checked={localConfig.autoMergeEnabled}
-              onCheckedChange={(v) => setLocalConfig({ ...localConfig, autoMergeEnabled: v })}
             />
           </div>
         </div>

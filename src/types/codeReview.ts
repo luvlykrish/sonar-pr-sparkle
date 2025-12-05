@@ -195,6 +195,19 @@ export interface AIConfig {
   model: string;
   autoMergeEnabled: boolean;
   postToGitHub: boolean;
+  /**
+   * Auto-merge mode: 'less' means auto-merge when both AI and Sonar scores are less than thresholds.
+   * 'greater' means auto-merge when both AI and Sonar scores are greater than thresholds.
+   */
+  autoMergeMode?: 'less' | 'greater';
+  /** Threshold applied to AI overall score (0-100). */
+  autoMergeThresholdAI?: number;
+  /** Threshold applied to Sonar metric (issues total). */
+  autoMergeThresholdSonar?: number;
+  /** Threshold applied to JUnit test score (0-100) when Java files are present. */
+  autoMergeThresholdJUnit?: number;
+  /** When true, require JUnit threshold when Java files are present to auto-merge. */
+  requireJUnitForJava?: boolean;
 }
 
 export const DEFAULT_AI_CONFIG: AIConfig = {
@@ -203,6 +216,11 @@ export const DEFAULT_AI_CONFIG: AIConfig = {
   model: 'gpt-4o',
   autoMergeEnabled: false,
   postToGitHub: true,
+  autoMergeMode: 'less',
+  autoMergeThresholdAI: 70,
+  autoMergeThresholdSonar: 5,
+  autoMergeThresholdJUnit: 70,
+  requireJUnitForJava: false,
 };
 
 export const AI_MODELS: Record<AIProvider, string[]> = {

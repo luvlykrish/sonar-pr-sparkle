@@ -56,6 +56,32 @@ export function AIReviewPanel({ pr, review, onGenerateReview, isGenerating }: AI
     );
   }
 
+  // Disable AI review for non-open PRs
+  if (pr.state !== 'open') {
+    return (
+      <Card className="glass-card">
+        <CardHeader className="pb-3">
+          <CardTitle className="flex items-center gap-2">
+            <Sparkles className="h-5 w-5 text-muted-foreground" />
+            AI Code Review
+          </CardTitle>
+          <CardDescription>
+            Sourcery-style AI commands for PR #{pr.number}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col items-center justify-center py-12 text-center">
+          <AlertCircle className="h-12 w-12 text-muted-foreground mb-4" />
+          <p className="text-muted-foreground font-medium">
+            {pr.state === 'closed' ? 'Closed PRs cannot be reviewed' : 'Merged PRs cannot be reviewed'}
+          </p>
+          <p className="text-sm text-muted-foreground mt-1">
+            AI code review is only available for open pull requests
+          </p>
+        </CardContent>
+      </Card>
+    );
+  }
+
   return (
     <Card className="glass-card">
       <CardHeader className="pb-3">

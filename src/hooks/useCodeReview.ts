@@ -37,14 +37,23 @@ export function useCodeReview(): UseCodeReviewReturn {
     localStorage.setItem('sonar_thresholds', JSON.stringify(newThresholds));
   }, []);
 
-  // Mock SonarQube results for demonstration
+  // Mock SonarQube results for demonstration (deterministic based on PR data)
   const mockSonarResults = useCallback((pr: PullRequest): SonarQubeResults => {
-    const bugs = Math.floor(Math.random() * 5);
-    const vulnerabilities = Math.floor(Math.random() * 3);
-    const codeSmells = Math.floor(Math.random() * 20);
-    const coverage = 70 + Math.random() * 25;
-    const duplicatedLines = Math.random() * 5;
-    const securityHotspots = Math.floor(Math.random() * 4);
+    // Use PR data (additions + deletions + files) as a seed for deterministic but varying results
+    // This ensures the same PR always gets the same score within a session
+    const seed = pr.additions + pr.deletions + pr.changedFiles;
+    const seedHash = (seed * 73856093) ^ (pr.number * 19349663);
+    const seededRandom = (index: number) => {
+      const x = Math.sin(seedHash + index) * 10000;
+      return x - Math.floor(x);
+    };
+
+    const bugs = Math.floor(seededRandom(1) * 5);
+    const vulnerabilities = Math.floor(seededRandom(2) * 3);
+    const codeSmells = Math.floor(seededRandom(3) * 20);
+    const coverage = 70 + seededRandom(4) * 25;
+    const duplicatedLines = seededRandom(5) * 5;
+    const securityHotspots = Math.floor(seededRandom(6) * 4);
 
     const checkThreshold = (value: number, threshold: number, inverse = false): boolean => {
       return inverse ? value < threshold : value > threshold;
@@ -57,10 +66,10 @@ export function useCodeReview(): UseCodeReviewReturn {
     if (coverage < thresholds.coverageMin) violations.push(`Coverage: ${coverage.toFixed(1)}% (minimum: ${thresholds.coverageMin}%)`);
     if (duplicatedLines > thresholds.duplicatedLinesMax) violations.push(`Duplicated Lines: ${duplicatedLines.toFixed(1)}% (max: ${thresholds.duplicatedLinesMax}%)`);
 
-    const blockerCount = Math.floor(Math.random() * 2);
-    const criticalCount = Math.floor(Math.random() * 3);
-    const majorCount = Math.floor(Math.random() * 8);
-    const minorCount = Math.floor(Math.random() * 15);
+    const blockerCount = Math.floor(seededRandom(7) * 2);
+    const criticalCount = Math.floor(seededRandom(8) * 3);
+    const majorCount = Math.floor(seededRandom(9) * 8);
+    const minorCount = Math.floor(seededRandom(10) * 15);
 
     return {
       scanMetadata: {
@@ -84,7 +93,7 @@ export function useCodeReview(): UseCodeReviewReturn {
         coverage: { value: coverage.toFixed(1), threshold: thresholds.coverageMin, exceeded: coverage < thresholds.coverageMin },
         duplicatedLinesDensity: { value: duplicatedLines.toFixed(1), threshold: thresholds.duplicatedLinesMax, exceeded: duplicatedLines > thresholds.duplicatedLinesMax },
         securityHotspots: { value: securityHotspots, threshold: thresholds.securityHotspots, exceeded: securityHotspots > thresholds.securityHotspots },
-        technicalDebt: { value: `${Math.floor(Math.random() * 4)}h ${Math.floor(Math.random() * 60)}min`, threshold: 0, exceeded: false },
+        technicalDebt: { value: `${Math.floor(seededRandom(11) * 4)}h ${Math.floor(seededRandom(12) * 60)}min`, threshold: 0, exceeded: false },
       },
       issuesSummary: {
         bySeverity: {
@@ -92,7 +101,7 @@ export function useCodeReview(): UseCodeReviewReturn {
           critical: { count: criticalCount, threshold: thresholds.criticalIssues, exceeded: criticalCount > thresholds.criticalIssues },
           major: { count: majorCount, threshold: 10, exceeded: false },
           minor: { count: minorCount, threshold: 20, exceeded: false },
-          info: { count: Math.floor(Math.random() * 5), threshold: 100, exceeded: false },
+          info: { count: Math.floor(seededRandom(13) * 5), threshold: 100, exceeded: false },
         },
         byType: {
           bug: { count: bugs, threshold: thresholds.bugs, exceeded: bugs > thresholds.bugs },

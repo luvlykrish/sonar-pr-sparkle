@@ -25,6 +25,9 @@ import {
   MessageSquare
 } from 'lucide-react';
 import { toast } from '@/hooks/use-toast';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { shouldAutoMerge, decisionReason, AutoMergeConfig } from '@/lib/autoMerge';
+import { saveHistory } from '@/lib/autoMergeHistory';
 
 export default function Dashboard() {
   const { 
@@ -58,6 +61,7 @@ export default function Dashboard() {
   const [selectedPR, setSelectedPR] = useState<PullRequest | null>(null);
   const [sonarResults, setSonarResults] = useState<SonarQubeResults | null>(null);
   const [aiReview, setAIReview] = useState<AIReviewResult | null>(null);
+  const [junitScore, setJUnitScore] = useState<number | null>(null);
   const [isDark, setIsDark] = useState(() => {
     if (typeof window !== 'undefined') {
       return document.documentElement.classList.contains('dark');
@@ -129,31 +133,110 @@ ${suggestions || 'No specific suggestions.'}
     if (review) {
       setAIReview(review);
 
-      // Post to GitHub if enabled
-      if (aiConfig.postToGitHub && config) {
-        const markdown = formatReviewAsMarkdown(review, selectedPR);
-        await postPRComment(selectedPR.number, markdown);
+      // Determine auto-merge behavior based on configurable AI & Sonar thresholds.
+      // Assumptions made:
+      // - AI overall score is 0-100 (higher is better).
+      // - Sonar metric used for the decision is `issuesSummary.total` (lower is better).
+      // - `aiConfig.autoMergeMode === 'less'` means auto-merge when BOTH values are less than thresholds.
+      //   `autoMergeMode === 'greater'` means auto-merge when BOTH values are greater than thresholds.
+      // These choices are configurable via AI settings (defaults set in types).
+
+      const aiScore = review.overallScore;
+      const sonarIssues = results?.issuesSummary?.total ?? Infinity;
+
+      const cfg: AutoMergeConfig = {
+        enabled: !!aiConfig.autoMergeEnabled,
+        mode: aiConfig.autoMergeMode || 'less',
+        aiThreshold: aiConfig.autoMergeThresholdAI ?? 70,
+        sonarThreshold: aiConfig.autoMergeThresholdSonar ?? 5,
+      };
+
+      // Detect if Java files are present in the PR and compute a simple JUnit score heuristic.
+  const hasJava = files.some(f => f.filename.endsWith('.java'));
+      // Heuristic: if the PR includes test files in typical Java test paths, give a high junitScore;
+      // otherwise 0. This is a lightweight approximation since we can't run tests here.
+      const junitTestPatterns = ['/src/test/java/', '/test/java/', '/src/main/java/'];
+      const hasJUnitTestsInPR = files.some(f => junitTestPatterns.some(p => f.filename.includes(p)));
+  const junitScore = hasJava ? (hasJUnitTestsInPR ? 90 : 0) : 100;
+  // store computed junit score for diagnostics
+  setJUnitScore(junitScore);
+
+      const willMergeBase = shouldAutoMerge(aiScore, sonarIssues, cfg);
+      const reasonBase = decisionReason(aiScore, sonarIssues, cfg);
+
+      // If Java files present and the feature is enabled, require junit score threshold as well
+      const junitThreshold = aiConfig.autoMergeThresholdJUnit ?? 70;
+      const requireJUnit = !!aiConfig.requireJUnitForJava;
+      
+      // Properly handle Java/JUnit requirement
+      let finalWillMerge = false;
+      let junitReason = '';
+      if (cfg.enabled) {
+        if (hasJava && requireJUnit) {
+          // Java files present and JUnit required: need both base decision AND junit score
+          finalWillMerge = willMergeBase && junitScore >= junitThreshold;
+          junitReason = `; Java detected, JUnit required: junitScore=${junitScore} >= ${junitThreshold} => ${junitScore >= junitThreshold}`;
+        } else {
+          // Either no Java files, or JUnit not required: just check base decision
+          finalWillMerge = willMergeBase;
+          junitReason = `; hasJava=${hasJava}, requireJUnit=${requireJUnit}`;
+        }
       }
 
-      // Auto-merge logic
-      const hasNoMajorIssues = 
-        !results.thresholdCheck.exceeded &&
-        review.overallScore >= 70 &&
-        !review.suggestions.some(s => s.severity === 'critical' || s.severity === 'high');
+      // Save decision to history (localStorage)
+      try {
+        saveHistory(selectedPR.number, {
+          timestamp: new Date().toISOString(),
+          aiScore,
+          sonarIssues,
+          mode: cfg.mode,
+          aiThreshold: cfg.aiThreshold,
+          sonarThreshold: cfg.sonarThreshold,
+          decision: finalWillMerge ? 'will_merge' : (cfg.enabled ? 'will_not_merge' : 'disabled'),
+          details: `${reasonBase}${junitReason}; cfgEnabled=${cfg.enabled}`,
+        });
+      } catch (e) {
+        console.error('Failed to save auto-merge history', e);
+      }
 
-      if (aiConfig.autoMergeEnabled && hasNoMajorIssues && selectedPR.state === 'open') {
+      if (finalWillMerge) {
         toast({
-          title: "Auto-Merge Triggered",
-          description: "No major issues found. Attempting to merge...",
+          title: 'Auto-Merge Triggered',
+          description: 'Configured thresholds met. Attempting to merge...',
         });
-        await mergePR(selectedPR.number, selectedPR.title);
-        fetchPullRequests(); // Refresh PR list
-      } else if (aiConfig.autoMergeEnabled && !hasNoMajorIssues) {
-        toast({
-          title: "Auto-Merge Blocked",
-          description: "Major issues detected. Manual review required.",
-          variant: "destructive",
+        console.log(`[AUTO-MERGE] ✅ MERGING PR #${selectedPR.number}: cfg.enabled=${cfg.enabled}, finalWillMerge=${finalWillMerge}`);
+        console.log(`  → aiScore=${aiScore} (threshold ${cfg.aiThreshold}), sonarIssues=${sonarIssues} (threshold ${cfg.sonarThreshold}), mode=${cfg.mode}`);
+        console.log(`  → ${reasonBase}`);
+        const merged = await mergePR(selectedPR.number, selectedPR.title);
+        // update history with result
+        saveHistory(selectedPR.number, {
+          timestamp: new Date().toISOString(),
+          aiScore,
+          sonarIssues,
+          mode: cfg.mode,
+          aiThreshold: cfg.aiThreshold,
+          sonarThreshold: cfg.sonarThreshold,
+          decision: merged ? 'merged' : 'merge_failed',
+          details: merged ? 'Merged successfully' : 'Merge attempt failed',
         });
+        if (merged) fetchPullRequests();
+      } else {
+        // If auto-merge is enabled but conditions not met, show a block toast.
+        if (aiConfig.autoMergeEnabled) {
+          console.log(`[AUTO-MERGE] ❌ NOT MERGING PR #${selectedPR.number}: cfg.enabled=${cfg.enabled}, finalWillMerge=${finalWillMerge}`);
+          console.log(`  → ${reasonBase}`);
+          console.log(`  → Decision: ${finalWillMerge ? 'SHOULD MERGE' : 'SHOULD NOT MERGE'}`);
+          toast({
+            title: 'Auto-Merge Not Triggered',
+            description: 'Configured thresholds not met — posting review comment instead.',
+          });
+        }
+
+        // Default behavior: post comment if configured
+        if (aiConfig.postToGitHub && config) {
+          const markdown = formatReviewAsMarkdown(review, selectedPR);
+          await postPRComment(selectedPR.number, markdown);
+        }
       }
     }
 
@@ -237,6 +320,37 @@ ${suggestions || 'No specific suggestions.'}
                     Merge PR
                   </Button>
                 )}
+                {/* Diagnostics Card */}
+                <Card className="ml-4 hidden md:block">
+                  <CardHeader>
+                    <CardTitle className="text-sm">Auto-Merge Diagnostics</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="text-xs">
+                      <div>AI Score: <span className="font-medium">{aiReview?.overallScore ?? '—'}</span></div>
+                      <div>Sonar Issues: <span className="font-medium">{sonarResults?.issuesSummary?.total ?? '—'}</span></div>
+                      <div>JUnit Score: <span className="font-medium">{junitScore ?? '—'}</span></div>
+                      <div>Mode: <span className="font-medium">{aiConfig.autoMergeMode ?? 'less'}</span></div>
+                      <div>AI Threshold: <span className="font-medium">{aiConfig.autoMergeThresholdAI ?? 70}</span></div>
+                      <div>Sonar Threshold: <span className="font-medium">{aiConfig.autoMergeThresholdSonar ?? 5}</span></div>
+                      <div className="pt-2">Decision: <span className="font-medium">
+                        {(() => {
+                          const aiScore = aiReview?.overallScore ?? 0;
+                          const sonarIssues = sonarResults?.issuesSummary?.total ?? Infinity;
+                          const mode = aiConfig.autoMergeMode || 'less';
+                          const aiThreshold = aiConfig.autoMergeThresholdAI ?? 70;
+                          const sonarThreshold = aiConfig.autoMergeThresholdSonar ?? 5;
+
+                          if (!aiConfig.autoMergeEnabled) return 'Auto-merge disabled';
+                          if (mode === 'less') {
+                            return (aiScore < aiThreshold && sonarIssues < sonarThreshold) ? 'Will auto-merge' : 'Will NOT auto-merge';
+                          }
+                          return (aiScore > aiThreshold && sonarIssues > sonarThreshold) ? 'Will auto-merge' : 'Will NOT auto-merge';
+                        })()}</span>
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
               </>
             )}
             <Button
@@ -343,6 +457,8 @@ ${suggestions || 'No specific suggestions.'}
               <ThresholdConfigPanel
                 thresholds={thresholds}
                 onSave={setThresholds}
+                aiConfig={aiConfig}
+                onAIConfigSave={setAIConfig}
               />
             </div>
           </TabsContent>

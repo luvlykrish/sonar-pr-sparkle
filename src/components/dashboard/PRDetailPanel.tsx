@@ -1,4 +1,6 @@
 import { PullRequest, SonarQubeResults, AIReviewResult } from '@/types/codeReview';
+import { useState, useEffect } from 'react';
+import { getHistory, AutoMergeHistoryEntry } from '@/lib/autoMergeHistory';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -37,6 +39,20 @@ export function PRDetailPanel({
   isAnalyzing,
   config 
 }: PRDetailPanelProps) {
+  const [history, setHistory] = useState<AutoMergeHistoryEntry[]>([]);
+
+  useEffect(() => {
+    if (pr) {
+      try {
+        setHistory(getHistory(pr.number));
+      } catch (e) {
+        console.error('Failed to load auto-merge history', e);
+        setHistory([]);
+      }
+    } else {
+      setHistory([]);
+    }
+  }, [pr]);
   if (!pr) {
     return (
       <Card className="glass-card">
@@ -161,19 +177,28 @@ export function PRDetailPanel({
 
         {/* Action Buttons */}
         <div className="flex items-center gap-3">
-          <Button onClick={onRunAnalysis} disabled={isAnalyzing} className="flex-1">
-            {isAnalyzing ? (
-              <>
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                Analyzing...
-              </>
-            ) : (
-              <>
-                <Play className="mr-2 h-4 w-4" />
-                Run Full Analysis
-              </>
-            )}
-          </Button>
+          {pr.state !== 'open' ? (
+            <div className="flex-1 p-3 rounded-lg bg-muted/50 border border-muted flex items-center justify-center gap-2 text-muted-foreground">
+              <AlertTriangle className="h-4 w-4" />
+              <span className="text-sm">
+                {pr.state === 'closed' ? 'Closed PRs cannot be analyzed' : 'Merged PRs cannot be analyzed'}
+              </span>
+            </div>
+          ) : (
+            <Button onClick={onRunAnalysis} disabled={isAnalyzing} className="flex-1">
+              {isAnalyzing ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Analyzing...
+                </>
+              ) : (
+                <>
+                  <Play className="mr-2 h-4 w-4" />
+                  Run Full Analysis
+                </>
+              )}
+            </Button>
+          )}
           {config && (
             <Button variant="outline" asChild>
               <a
@@ -214,6 +239,28 @@ export function PRDetailPanel({
               </div>
             )}
           </div>
+        )}
+
+        {/* Auto-merge decision history */}
+        {history && history.length > 0 && (
+          <>
+            <Separator />
+            <div>
+              <h3 className="text-sm font-medium mb-2">Latest Auto-Merge Decision</h3>
+              {history.slice(0, 1).map((h) => (
+                <div key={h.timestamp} className="p-3 rounded-lg border border-border bg-muted/20 text-sm">
+                  <div className="flex items-center justify-between">
+                    <div className="text-xs text-muted-foreground">{new Date(h.timestamp).toLocaleString()}</div>
+                    <div className="text-xs font-medium">{h.decision.replace('_', ' ')}</div>
+                  </div>
+                  <div className="mt-1 text-xs">
+                    AI: {h.aiScore} (thr {h.aiThreshold}) • Sonar: {h.sonarIssues} (thr {h.sonarThreshold})
+                  </div>
+                  {h.details && <div className="mt-1 text-xs text-muted-foreground">{h.details}</div>}
+                </div>
+              ))}
+            </div>
+          </>
         )}
       </CardContent>
     </Card>
