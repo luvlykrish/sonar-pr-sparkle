@@ -186,3 +186,28 @@ export const DEFAULT_THRESHOLDS: ThresholdConfig = {
   blockerIssues: 0,
   criticalIssues: 0,
 };
+
+export type AIProvider = 'openai' | 'anthropic' | 'google' | 'groq';
+
+export interface AIConfig {
+  provider: AIProvider;
+  apiKey: string;
+  model: string;
+  autoMergeEnabled: boolean;
+  postToGitHub: boolean;
+}
+
+export const DEFAULT_AI_CONFIG: AIConfig = {
+  provider: 'openai',
+  apiKey: '',
+  model: 'gpt-4o',
+  autoMergeEnabled: false,
+  postToGitHub: true,
+};
+
+export const AI_MODELS: Record<AIProvider, string[]> = {
+  openai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-3.5-turbo'],
+  anthropic: ['claude-sonnet-4-20250514', 'claude-3-5-sonnet-20241022', 'claude-3-haiku-20240307'],
+  google: ['gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-pro'],
+  groq: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768'],
+};
