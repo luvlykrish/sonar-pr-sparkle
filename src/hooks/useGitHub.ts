@@ -87,33 +87,72 @@ export function useGitHub(): UseGitHubReturn {
       setIsLoading(true);
       setError(null);
 
-      const data = await githubFetch(`/repos/${config.owner}/${config.repo}/pulls?state=all&per_page=50`);
+      // First, get list of PRs
+      const data = await githubFetch(`/repos/${config.owner}/${config.repo}/pulls?state=all&per_page=20`);
       
-      const prs: PullRequest[] = data.map((pr: any) => ({
-        id: pr.id,
-        number: pr.number,
-        title: pr.title,
-        body: pr.body,
-        state: pr.merged_at ? 'merged' : pr.state,
-        author: pr.user.login,
-        authorAvatar: pr.user.avatar_url,
-        createdAt: pr.created_at,
-        updatedAt: pr.updated_at,
-        head: {
-          ref: pr.head.ref,
-          sha: pr.head.sha,
-        },
-        base: {
-          ref: pr.base.ref,
-        },
-        additions: pr.additions || 0,
-        deletions: pr.deletions || 0,
-        changedFiles: pr.changed_files || 0,
-        labels: pr.labels?.map((l: any) => l.name) || [],
-        reviewState: 'pending',
-      }));
+      // Fetch detailed info for each PR to get accurate file counts
+      const detailedPRs = await Promise.all(
+        data.slice(0, 20).map(async (pr: any) => {
+          try {
+            // Fetch individual PR details which includes additions/deletions/changed_files
+            const detail = await githubFetch(`/repos/${config.owner}/${config.repo}/pulls/${pr.number}`);
+            return {
+              id: detail.id,
+              number: detail.number,
+              title: detail.title,
+              body: detail.body,
+              state: detail.merged_at ? 'merged' : detail.state,
+              author: detail.user.login,
+              authorAvatar: detail.user.avatar_url,
+              createdAt: detail.created_at,
+              updatedAt: detail.updated_at,
+              head: {
+                ref: detail.head.ref,
+                sha: detail.head.sha,
+              },
+              base: {
+                ref: detail.base.ref,
+              },
+              additions: detail.additions || 0,
+              deletions: detail.deletions || 0,
+              changedFiles: detail.changed_files || 0,
+              labels: detail.labels?.map((l: any) => l.name) || [],
+              reviewState: 'pending' as const,
+            };
+          } catch {
+            // Fallback to basic info if detail fetch fails
+            return {
+              id: pr.id,
+              number: pr.number,
+              title: pr.title,
+              body: pr.body,
+              state: pr.merged_at ? 'merged' : pr.state,
+              author: pr.user.login,
+              authorAvatar: pr.user.avatar_url,
+              createdAt: pr.created_at,
+              updatedAt: pr.updated_at,
+              head: {
+                ref: pr.head.ref,
+                sha: pr.head.sha,
+              },
+              base: {
+                ref: pr.base.ref,
+              },
+              additions: 0,
+              deletions: 0,
+              changedFiles: 0,
+              labels: pr.labels?.map((l: any) => l.name) || [],
+              reviewState: 'pending' as const,
+            };
+          }
+        })
+      );
 
-      setPullRequests(prs);
+      setPullRequests(detailedPRs);
+      toast({
+        title: "PRs Loaded",
+        description: `Fetched ${detailedPRs.length} pull requests with details`,
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to fetch pull requests';
       setError(message);
