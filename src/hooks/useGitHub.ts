@@ -227,34 +227,77 @@ export function useGitHub(): UseGitHubReturn {
 
   const postPRComment = useCallback(async (prNumber: number, body: string): Promise<boolean> => {
     if (!config) return false;
+    // Build base headers similar to other githubFetch calls
+    const buildHeaders = (authValue: string) => ({
+      'Authorization': authValue,
+      'Accept': 'application/vnd.github.v3+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'Content-Type': 'application/json',
+    });
 
+    // Try default Bearer first, then fallback to 'token ' prefix if we get a 403
+    let triedFallback = false;
     try {
-      const response = await fetch(`https://api.github.com/repos/${config.owner}/${config.repo}/issues/${prNumber}/comments`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${config.token}`,
-          'Accept': 'application/vnd.github.v3+json',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ body }),
-      });
+      const url = `https://api.github.com/repos/${config.owner}/${config.repo}/issues/${prNumber}/comments`;
+
+      const doRequest = async (headers: Record<string, string>) => {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ body }),
+        });
+        return response;
+      };
+
+      // 1) First attempt with Bearer
+      let response = await doRequest(buildHeaders(`Bearer ${config.token}`));
+
+      // If 403, try once with the older 'token' prefix — some tokens or integrations expect that
+      if (response.status === 403 && !triedFallback) {
+        triedFallback = true;
+        console.warn('postPRComment: got 403 with Bearer, retrying with `token ` prefix');
+        response = await doRequest(buildHeaders(`token ${config.token}`));
+      }
 
       if (!response.ok) {
-        throw new Error(`Failed to post comment: ${response.status}`);
+        // Try to parse error body for more actionable message
+        const errorData = await response.json().catch(() => ({}));
+        const message = errorData.message || `Failed to post comment: ${response.status}`;
+
+        // Provide actionable tips for 403
+        if (response.status === 403) {
+          console.error('GitHub API 403 response:', errorData);
+          toast({
+            title: 'Failed to Post Comment (403)',
+            description: `${message}. This often means the token lacks required scopes or is a GitHub App token without issue permissions. Use a PAT with repo scope or update app permissions.`,
+            variant: 'destructive',
+          });
+        } else {
+          toast({
+            title: 'Failed to Post Comment',
+            description: message,
+            variant: 'destructive',
+          });
+        }
+
+        throw new Error(message);
       }
 
       toast({
-        title: "Comment Posted",
+        title: 'Comment Posted',
         description: `Review posted to PR #${prNumber}`,
       });
       return true;
     } catch (err) {
       console.error('Failed to post PR comment:', err);
-      toast({
-        title: "Failed to Post Comment",
-        description: err instanceof Error ? err.message : "Unknown error",
-        variant: "destructive",
-      });
+      // If we already showed a toast with a specific message above, avoid duplicate destructive toast
+      if (!(err instanceof Error && err.message && err.message.includes('Failed to Post Comment (403)'))) {
+        toast({
+          title: 'Failed to Post Comment',
+          description: err instanceof Error ? err.message : 'Unknown error',
+          variant: 'destructive',
+        });
+      }
       return false;
     }
   }, [config]);
