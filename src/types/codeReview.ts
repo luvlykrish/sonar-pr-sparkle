@@ -229,3 +229,56 @@ export const AI_MODELS: Record<AIProvider, string[]> = {
   google: ['gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-pro'],
   groq: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768'],
 };
+
+// Jira Integration Types
+export interface JiraConfig {
+  enabled: boolean;
+  domain: string;
+  email: string;
+  apiToken: string;
+  autoDetect: boolean;
+  projectKeyPattern?: string;
+}
+
+export interface JiraTicket {
+  key: string;
+  summary: string;
+  description: string;
+  renderedDescription?: string;
+  status: string;
+  type: string;
+  priority: string;
+  assignee?: string;
+  reporter?: string;
+  labels: string[];
+  attachments: JiraAttachment[];
+  acceptanceCriteria?: string;
+  url: string;
+}
+
+export interface JiraAttachment {
+  id: string;
+  filename: string;
+  mimeType: string;
+  url: string;
+  thumbnail?: string;
+}
+
+export const DEFAULT_JIRA_CONFIG: JiraConfig = {
+  enabled: false,
+  domain: '',
+  email: '',
+  apiToken: '',
+  autoDetect: true,
+};
+
+export interface BusinessLogicValidation {
+  ticketKey: string;
+  requirements: string[];
+  implementedRequirements: string[];
+  missingRequirements: string[];
+  partiallyImplemented: string[];
+  additionalChanges: string[];
+  score: number;
+  summary: string;
+}

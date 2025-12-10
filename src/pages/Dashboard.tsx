@@ -2,9 +2,12 @@ import { useState, useEffect, useCallback } from 'react';
 import { useGitHub } from '@/hooks/useGitHub';
 import { useCodeReview } from '@/hooks/useCodeReview';
 import { useAIReview } from '@/hooks/useAIReview';
-import { PullRequest, SonarQubeResults, AIReviewResult, ReviewCommand } from '@/types/codeReview';
+import { useJira } from '@/hooks/useJira';
+import { PullRequest, SonarQubeResults, AIReviewResult, ReviewCommand, JiraTicket, BusinessLogicValidation } from '@/types/codeReview';
 import { GitHubConfigPanel } from '@/components/dashboard/GitHubConfigPanel';
 import { AIConfigPanel } from '@/components/dashboard/AIConfigPanel';
+import { JiraConfigPanel } from '@/components/dashboard/JiraConfigPanel';
+import { JiraTicketPanel } from '@/components/dashboard/JiraTicketPanel';
 import { PRList } from '@/components/dashboard/PRList';
 import { PRDetailPanel } from '@/components/dashboard/PRDetailPanel';
 import { SonarResultsPanel } from '@/components/dashboard/SonarResultsPanel';
@@ -22,7 +25,8 @@ import {
   Webhook,
   Code2,
   GitMerge,
-  MessageSquare
+  MessageSquare,
+  Ticket
 } from 'lucide-react';
 import { toast } from '@/hooks/use-toast';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -55,12 +59,25 @@ export default function Dashboard() {
     aiConfig,
     setAIConfig,
     generateReview,
+    validateBusinessLogic,
     isGenerating: isGeneratingAI
   } = useAIReview();
+
+  const {
+    jiraConfig,
+    setJiraConfig,
+    extractTicketId,
+    fetchTicket,
+    fetchTicketFromUrl,
+    isLoading: isJiraLoading
+  } = useJira();
 
   const [selectedPR, setSelectedPR] = useState<PullRequest | null>(null);
   const [sonarResults, setSonarResults] = useState<SonarQubeResults | null>(null);
   const [aiReview, setAIReview] = useState<AIReviewResult | null>(null);
+  const [jiraTicket, setJiraTicket] = useState<JiraTicket | null>(null);
+  const [detectedTicketId, setDetectedTicketId] = useState<string | null>(null);
+  const [businessLogicValidation, setBusinessLogicValidation] = useState<BusinessLogicValidation | null>(null);
   const [junitScore, setJUnitScore] = useState<number | null>(null);
   const [isDark, setIsDark] = useState(() => {
     if (typeof window !== 'undefined') {
@@ -87,7 +104,20 @@ export default function Dashboard() {
     setSelectedPR(pr);
     setSonarResults(null);
     setAIReview(null);
-  }, []);
+    setJiraTicket(null);
+    setBusinessLogicValidation(null);
+    
+    // Auto-detect Jira ticket from PR title/branch if enabled
+    if (jiraConfig.enabled && jiraConfig.autoDetect) {
+      const fromTitle = extractTicketId(pr.title);
+      const fromBranch = extractTicketId(pr.head.ref);
+      const fromBody = pr.body ? extractTicketId(pr.body) : null;
+      const detected = fromTitle || fromBranch || fromBody;
+      setDetectedTicketId(detected);
+    } else {
+      setDetectedTicketId(null);
+    }
+  }, [jiraConfig, extractTicketId]);
 
   const formatReviewAsMarkdown = (review: AIReviewResult, pr: PullRequest): string => {
     const suggestions = review.suggestions
@@ -127,8 +157,14 @@ ${suggestions || 'No specific suggestions.'}
     const results = mockSonarResults(selectedPR);
     setSonarResults(results);
     
-    // Generate AI review with actual code diff
-    const review = await generateReview(selectedPR, files, { type: 'review', prNumber: selectedPR.number });
+    // Generate AI review with actual code diff and Jira context if available
+    const review = await generateReview(selectedPR, files, { type: 'review', prNumber: selectedPR.number }, jiraTicket);
+    
+    // If Jira ticket is present, also run business logic validation
+    if (jiraTicket) {
+      const validation = await validateBusinessLogic(selectedPR, files, jiraTicket);
+      setBusinessLogicValidation(validation);
+    }
     
     if (review) {
       setAIReview(review);
@@ -252,18 +288,28 @@ ${suggestions || 'No specific suggestions.'}
         description: "All quality thresholds met",
       });
     }
-  }, [selectedPR, fetchPRFiles, analyzePR, mockSonarResults, generateReview, aiConfig, config, postPRComment, mergePR, fetchPullRequests]);
+  }, [selectedPR, fetchPRFiles, analyzePR, mockSonarResults, generateReview, validateBusinessLogic, jiraTicket, aiConfig, config, postPRComment, mergePR, fetchPullRequests]);
 
   const handleGenerateAIReview = useCallback(async (command: ReviewCommand) => {
     if (!selectedPR) return;
     
     const files = await fetchPRFiles(selectedPR.number);
-    const review = await generateReview(selectedPR, files, command);
+    const review = await generateReview(selectedPR, files, command, jiraTicket);
     
     if (review) {
       setAIReview(prev => prev ? { ...prev, ...review } : review);
     }
-  }, [selectedPR, fetchPRFiles, generateReview]);
+  }, [selectedPR, fetchPRFiles, generateReview, jiraTicket]);
+
+  const handleFetchJiraTicket = useCallback(async (ticketId: string) => {
+    const ticket = await fetchTicket(ticketId);
+    if (ticket) setJiraTicket(ticket);
+  }, [fetchTicket]);
+
+  const handleFetchJiraFromUrl = useCallback(async (url: string) => {
+    const ticket = await fetchTicketFromUrl(url);
+    if (ticket) setJiraTicket(ticket);
+  }, [fetchTicketFromUrl]);
 
   const handlePostToGitHub = useCallback(async () => {
     if (!selectedPR || !aiReview) return;
@@ -432,6 +478,16 @@ ${suggestions || 'No specific suggestions.'}
                         onGenerateReview={handleGenerateAIReview}
                         isGenerating={isGeneratingAI}
                       />
+                      {jiraConfig.enabled && (
+                        <JiraTicketPanel
+                          ticket={jiraTicket}
+                          detectedTicketId={detectedTicketId}
+                          pr={selectedPR}
+                          isLoading={isJiraLoading}
+                          onFetchTicket={handleFetchJiraTicket}
+                          onFetchFromUrl={handleFetchJiraFromUrl}
+                        />
+                      )}
                     </div>
                   )}
                 </div>
@@ -441,7 +497,7 @@ ${suggestions || 'No specific suggestions.'}
 
           {/* Settings Tab */}
           <TabsContent value="settings" className="space-y-6">
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               <GitHubConfigPanel
                 config={config}
                 onSave={setConfig}
@@ -451,6 +507,10 @@ ${suggestions || 'No specific suggestions.'}
               <AIConfigPanel
                 config={aiConfig}
                 onSave={setAIConfig}
+              />
+              <JiraConfigPanel
+                config={jiraConfig}
+                onSave={setJiraConfig}
               />
             </div>
             <div className="max-w-2xl">
