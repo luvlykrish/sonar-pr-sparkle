@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { AIConfig, AIReviewResult, PullRequest, ReviewCommand, DEFAULT_AI_CONFIG } from '@/types/codeReview';
+import { AIConfig, AIReviewResult, PullRequest, ReviewCommand, DEFAULT_AI_CONFIG, JiraTicket, BusinessLogicValidation } from '@/types/codeReview';
 import { toast } from '@/hooks/use-toast';
 
 interface PRFile {
@@ -13,7 +13,8 @@ interface PRFile {
 interface UseAIReviewReturn {
   aiConfig: AIConfig;
   setAIConfig: (config: AIConfig) => void;
-  generateReview: (pr: PullRequest, files: PRFile[], command: ReviewCommand) => Promise<AIReviewResult | null>;
+  generateReview: (pr: PullRequest, files: PRFile[], command: ReviewCommand, jiraTicket?: JiraTicket | null) => Promise<AIReviewResult | null>;
+  validateBusinessLogic: (pr: PullRequest, files: PRFile[], jiraTicket: JiraTicket) => Promise<BusinessLogicValidation | null>;
   isGenerating: boolean;
 }
 
@@ -32,7 +33,8 @@ export function useAIReview(): UseAIReviewReturn {
   const generateReview = useCallback(async (
     pr: PullRequest,
     files: PRFile[],
-    command: ReviewCommand
+    command: ReviewCommand,
+    jiraTicket?: JiraTicket | null
   ): Promise<AIReviewResult | null> => {
     if (!aiConfig.apiKey) {
       toast({
@@ -46,13 +48,13 @@ export function useAIReview(): UseAIReviewReturn {
     setIsGenerating(true);
 
     try {
-      const prompt = buildReviewPrompt(pr, files, command);
+      const prompt = buildReviewPrompt(pr, files, command, jiraTicket);
       const response = await callAIProvider(aiConfig, prompt);
       const review = parseAIResponse(response, aiConfig);
       
       toast({
         title: "AI Review Generated",
-        description: `Review completed using ${aiConfig.provider}`,
+        description: `Review completed using ${aiConfig.provider}${jiraTicket ? ' with business logic validation' : ''}`,
       });
 
       return review;
@@ -69,19 +71,77 @@ export function useAIReview(): UseAIReviewReturn {
     }
   }, [aiConfig]);
 
+  const validateBusinessLogic = useCallback(async (
+    pr: PullRequest,
+    files: PRFile[],
+    jiraTicket: JiraTicket
+  ): Promise<BusinessLogicValidation | null> => {
+    if (!aiConfig.apiKey) {
+      toast({
+        title: "AI Not Configured",
+        description: "Please configure your AI API key in Settings",
+        variant: "destructive",
+      });
+      return null;
+    }
+
+    setIsGenerating(true);
+
+    try {
+      const prompt = buildBusinessLogicPrompt(pr, files, jiraTicket);
+      const response = await callAIProvider(aiConfig, prompt);
+      const validation = parseBusinessLogicResponse(response, jiraTicket.key);
+      
+      toast({
+        title: "Business Logic Validation Complete",
+        description: `Validated against ${jiraTicket.key}`,
+      });
+
+      return validation;
+    } catch (error) {
+      console.error('Business logic validation error:', error);
+      toast({
+        title: "Validation Failed",
+        description: error instanceof Error ? error.message : "Failed to validate",
+        variant: "destructive",
+      });
+      return null;
+    } finally {
+      setIsGenerating(false);
+    }
+  }, [aiConfig]);
+
   return {
     aiConfig,
     setAIConfig,
     generateReview,
+    validateBusinessLogic,
     isGenerating,
   };
 }
 
-function buildReviewPrompt(pr: PullRequest, files: PRFile[], command: ReviewCommand): string {
+function buildReviewPrompt(pr: PullRequest, files: PRFile[], command: ReviewCommand, jiraTicket?: JiraTicket | null): string {
   const fileDiffs = files
     .filter(f => f.patch)
     .map(f => `### ${f.filename} (${f.status})\n\`\`\`diff\n${f.patch}\n\`\`\``)
     .join('\n\n');
+
+  let jiraContext = '';
+  if (jiraTicket) {
+    jiraContext = `
+### Linked Jira Ticket: ${jiraTicket.key}
+**Summary:** ${jiraTicket.summary}
+**Type:** ${jiraTicket.type} | **Priority:** ${jiraTicket.priority} | **Status:** ${jiraTicket.status}
+
+**Description:**
+${jiraTicket.description || 'No description provided'}
+
+${jiraTicket.acceptanceCriteria ? `**Acceptance Criteria:**
+${jiraTicket.acceptanceCriteria}` : ''}
+
+${jiraTicket.attachments.length > 0 ? `**Attachments:** ${jiraTicket.attachments.length} image(s) attached (UI mockups/screenshots may be present)` : ''}
+`;
+  }
 
   const baseContext = `
 ## Pull Request #${pr.number}: ${pr.title}
@@ -92,10 +152,19 @@ function buildReviewPrompt(pr: PullRequest, files: PRFile[], command: ReviewComm
 
 ### Description
 ${pr.body || 'No description provided'}
-
+${jiraContext}
 ### Code Changes
 ${fileDiffs || 'No code diff available'}
 `;
+
+  const businessLogicInstructions = jiraTicket ? `
+IMPORTANT: This PR is linked to Jira ticket ${jiraTicket.key}. You MUST:
+1. Validate that the code changes align with the requirements in the Jira ticket
+2. Check if acceptance criteria (if any) are addressed by the code
+3. Identify any gaps between requirements and implementation
+4. Note any code that goes beyond the scope of the ticket
+5. Include a "businessLogicValidation" section in your response with score 0-100
+` : '';
 
   const instructions = {
     review: `You are an expert code reviewer. Analyze this pull request and provide:
@@ -103,7 +172,7 @@ ${fileDiffs || 'No code diff available'}
 2. Code quality score (0-100) for: overall, codeQuality, security, performance, maintainability, testability
 3. Specific suggestions for improvement with severity (low/medium/high/critical), type (improvement/bug/security/performance/style), file location, and line numbers
 4. A recommended action: APPROVE, REQUEST_CHANGES, or COMMENT
-
+${businessLogicInstructions}
 Respond in this JSON format:
 {
   "summary": "...",
@@ -112,6 +181,14 @@ Respond in this JSON format:
   "suggestions": [
     { "type": "security", "severity": "high", "file": "...", "line": 42, "message": "...", "suggestion": "..." }
   ],
+  ${jiraTicket ? `"businessLogicValidation": {
+    "ticketKey": "${jiraTicket.key}",
+    "score": 85,
+    "summary": "...",
+    "implementedRequirements": ["requirement 1", "requirement 2"],
+    "missingRequirements": [],
+    "additionalChanges": []
+  },` : ''}
   "recommendation": "APPROVE"
 }`,
     summary: `Provide a brief summary of this PR's changes in 2-3 sentences. Respond with JSON: { "summary": "..." }`,
@@ -123,6 +200,90 @@ Respond in this JSON format:
   };
 
   return `${instructions[command.type]}\n\n${baseContext}`;
+}
+
+function buildBusinessLogicPrompt(pr: PullRequest, files: PRFile[], jiraTicket: JiraTicket): string {
+  const fileDiffs = files
+    .filter(f => f.patch)
+    .map(f => `### ${f.filename} (${f.status})\n\`\`\`diff\n${f.patch}\n\`\`\``)
+    .join('\n\n');
+
+  return `You are an expert at validating code changes against business requirements.
+
+## Jira Ticket: ${jiraTicket.key}
+**Summary:** ${jiraTicket.summary}
+**Type:** ${jiraTicket.type}
+**Priority:** ${jiraTicket.priority}
+
+### Requirements
+${jiraTicket.description || 'No description provided'}
+
+${jiraTicket.acceptanceCriteria ? `### Acceptance Criteria
+${jiraTicket.acceptanceCriteria}` : ''}
+
+${jiraTicket.attachments.length > 0 ? `### Visual Requirements
+${jiraTicket.attachments.length} image attachment(s) present - UI mockups or screenshots may define visual requirements.` : ''}
+
+## Pull Request #${pr.number}: ${pr.title}
+**Changes:** ${pr.additions} additions, ${pr.deletions} deletions across ${pr.changedFiles} files
+
+### PR Description
+${pr.body || 'No description provided'}
+
+### Code Changes
+${fileDiffs || 'No code diff available'}
+
+## Your Task
+Analyze the code changes and validate them against the Jira ticket requirements. Provide:
+1. Extract all requirements from the Jira ticket (title, description, acceptance criteria)
+2. Map each requirement to code changes that implement it
+3. Identify any requirements that are NOT implemented in this PR
+4. Identify any requirements that are PARTIALLY implemented
+5. Note any code changes that go BEYOND the scope of the ticket
+
+Respond in this JSON format:
+{
+  "requirements": ["list of all requirements extracted from Jira"],
+  "implementedRequirements": ["requirements fully addressed by code"],
+  "missingRequirements": ["requirements NOT addressed"],
+  "partiallyImplemented": ["requirements partially addressed with explanation"],
+  "additionalChanges": ["changes not in requirements"],
+  "score": 85,
+  "summary": "Brief validation summary"
+}`;
+}
+
+function parseBusinessLogicResponse(response: string, ticketKey: string): BusinessLogicValidation {
+  try {
+    const jsonMatch = response.match(/```json\s*([\s\S]*?)\s*```/) || 
+                      response.match(/```\s*([\s\S]*?)\s*```/) ||
+                      [null, response];
+    
+    const jsonStr = jsonMatch[1] || response;
+    const parsed = JSON.parse(jsonStr.trim());
+
+    return {
+      ticketKey,
+      requirements: parsed.requirements || [],
+      implementedRequirements: parsed.implementedRequirements || [],
+      missingRequirements: parsed.missingRequirements || [],
+      partiallyImplemented: parsed.partiallyImplemented || [],
+      additionalChanges: parsed.additionalChanges || [],
+      score: parsed.score || 0,
+      summary: parsed.summary || 'Validation complete',
+    };
+  } catch {
+    return {
+      ticketKey,
+      requirements: [],
+      implementedRequirements: [],
+      missingRequirements: [],
+      partiallyImplemented: [],
+      additionalChanges: [],
+      score: 0,
+      summary: 'Failed to parse validation response',
+    };
+  }
 }
 
 async function callAIProvider(config: AIConfig, prompt: string): Promise<string> {
