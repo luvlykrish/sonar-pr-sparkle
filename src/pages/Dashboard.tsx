@@ -7,7 +7,7 @@ import { PullRequest, SonarQubeResults, AIReviewResult, ReviewCommand, JiraTicke
 import { GitHubConfigPanel } from '@/components/dashboard/GitHubConfigPanel';
 import { AIConfigPanel } from '@/components/dashboard/AIConfigPanel';
 import { JiraConfigPanel } from '@/components/dashboard/JiraConfigPanel';
-import { JiraTicketPanel } from '@/components/dashboard/JiraTicketPanel';
+
 import { PRList } from '@/components/dashboard/PRList';
 import { PRDetailPanel } from '@/components/dashboard/PRDetailPanel';
 import { SonarResultsPanel } from '@/components/dashboard/SonarResultsPanel';
@@ -68,8 +68,6 @@ export default function Dashboard() {
     setJiraConfig,
     extractTicketId,
     fetchTicket,
-    fetchTicketFromUrl,
-    isLoading: isJiraLoading
   } = useJira();
 
   const [selectedPR, setSelectedPR] = useState<PullRequest | null>(null);
@@ -100,24 +98,35 @@ export default function Dashboard() {
     }
   }, [config, fetchPullRequests]);
 
-  const handleSelectPR = useCallback((pr: PullRequest) => {
+  const handleSelectPR = useCallback(async (pr: PullRequest) => {
     setSelectedPR(pr);
     setSonarResults(null);
     setAIReview(null);
     setJiraTicket(null);
     setBusinessLogicValidation(null);
+    setDetectedTicketId(null);
     
-    // Auto-detect Jira ticket from PR title/branch if enabled
+    // Auto-detect and fetch Jira ticket from PR title/branch/body if enabled
     if (jiraConfig.enabled && jiraConfig.autoDetect) {
       const fromTitle = extractTicketId(pr.title);
       const fromBranch = extractTicketId(pr.head.ref);
       const fromBody = pr.body ? extractTicketId(pr.body) : null;
       const detected = fromTitle || fromBranch || fromBody;
-      setDetectedTicketId(detected);
-    } else {
-      setDetectedTicketId(null);
+      
+      if (detected) {
+        setDetectedTicketId(detected);
+        // Auto-fetch the ticket details
+        const ticket = await fetchTicket(detected);
+        if (ticket) {
+          setJiraTicket(ticket);
+          toast({
+            title: "Jira Ticket Linked",
+            description: `Found and loaded ${ticket.key}: ${ticket.summary.slice(0, 50)}...`,
+          });
+        }
+      }
     }
-  }, [jiraConfig, extractTicketId]);
+  }, [jiraConfig, extractTicketId, fetchTicket]);
 
   const formatReviewAsMarkdown = (review: AIReviewResult, pr: PullRequest): string => {
     const suggestions = review.suggestions
@@ -301,15 +310,6 @@ ${suggestions || 'No specific suggestions.'}
     }
   }, [selectedPR, fetchPRFiles, generateReview, jiraTicket]);
 
-  const handleFetchJiraTicket = useCallback(async (ticketId: string) => {
-    const ticket = await fetchTicket(ticketId);
-    if (ticket) setJiraTicket(ticket);
-  }, [fetchTicket]);
-
-  const handleFetchJiraFromUrl = useCallback(async (url: string) => {
-    const ticket = await fetchTicketFromUrl(url);
-    if (ticket) setJiraTicket(ticket);
-  }, [fetchTicketFromUrl]);
 
   const handlePostToGitHub = useCallback(async () => {
     if (!selectedPR || !aiReview) return;
@@ -477,17 +477,8 @@ ${suggestions || 'No specific suggestions.'}
                         review={aiReview}
                         onGenerateReview={handleGenerateAIReview}
                         isGenerating={isGeneratingAI}
+                        jiraTicket={jiraTicket}
                       />
-                      {jiraConfig.enabled && (
-                        <JiraTicketPanel
-                          ticket={jiraTicket}
-                          detectedTicketId={detectedTicketId}
-                          pr={selectedPR}
-                          isLoading={isJiraLoading}
-                          onFetchTicket={handleFetchJiraTicket}
-                          onFetchFromUrl={handleFetchJiraFromUrl}
-                        />
-                      )}
                     </div>
                   )}
                 </div>
