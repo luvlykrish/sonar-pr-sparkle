@@ -1,0 +1,4 @@
+project_id = "xmzwuaysjthjpyixbyzt"
+
+[functions.jira-proxy]
+verify_jwt = false
