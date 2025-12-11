@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { AIReviewResult, PullRequest, ReviewCommand } from '@/types/codeReview';
+import { AIReviewResult, PullRequest, ReviewCommand, JiraTicket } from '@/types/codeReview';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -22,7 +22,8 @@ import {
   Zap,
   Wrench,
   TestTube,
-  Bot
+  Bot,
+  Ticket
 } from 'lucide-react';
 
 interface AIReviewPanelProps {
@@ -30,9 +31,10 @@ interface AIReviewPanelProps {
   review: AIReviewResult | null;
   onGenerateReview: (command: ReviewCommand) => Promise<void>;
   isGenerating: boolean;
+  jiraTicket?: JiraTicket | null;
 }
 
-export function AIReviewPanel({ pr, review, onGenerateReview, isGenerating }: AIReviewPanelProps) {
+export function AIReviewPanel({ pr, review, onGenerateReview, isGenerating, jiraTicket }: AIReviewPanelProps) {
   const [activeCommand, setActiveCommand] = useState<ReviewCommand['type'] | null>(null);
 
   const handleCommand = async (type: ReviewCommand['type']) => {
@@ -93,9 +95,18 @@ export function AIReviewPanel({ pr, review, onGenerateReview, isGenerating }: AI
               Score: {review.overallScore}/100
             </Badge>
           )}
+          {jiraTicket && (
+            <Badge variant="secondary" className="ml-2 gap-1">
+              <Ticket className="h-3 w-3" />
+              {jiraTicket.key}
+            </Badge>
+          )}
         </CardTitle>
         <CardDescription>
-          Sourcery-style AI commands for PR #{pr.number}
+          {jiraTicket 
+            ? `Reviewing PR #${pr.number} with business logic from ${jiraTicket.key}`
+            : `Sourcery-style AI commands for PR #${pr.number}`
+          }
         </CardDescription>
       </CardHeader>
       <CardContent>
