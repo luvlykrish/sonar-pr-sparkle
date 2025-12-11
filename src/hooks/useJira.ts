@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react';
 import { JiraConfig, JiraTicket, DEFAULT_JIRA_CONFIG } from '@/types/codeReview';
 import { toast } from '@/hooks/use-toast';
-
+import { supabase } from '@/integrations/supabase/client';
 interface UseJiraReturn {
   jiraConfig: JiraConfig;
   setJiraConfig: (config: JiraConfig) => void;
@@ -42,27 +42,26 @@ export function useJira(): UseJiraReturn {
 
     setIsLoading(true);
     try {
-      const auth = btoa(`${jiraConfig.email}:${jiraConfig.apiToken}`);
-      
-      // Fetch issue details
-      const issueResponse = await fetch(
-        `https://${jiraConfig.domain}/rest/api/3/issue/${ticketId}?expand=renderedFields`,
-        {
-          headers: {
-            'Authorization': `Basic ${auth}`,
-            'Accept': 'application/json',
-          },
-        }
-      );
+      const { data: issue, error } = await supabase.functions.invoke('jira-proxy', {
+        body: {
+          action: 'fetchTicket',
+          domain: jiraConfig.domain,
+          email: jiraConfig.email,
+          apiToken: jiraConfig.apiToken,
+          ticketId,
+        },
+      });
 
-      if (!issueResponse.ok) {
-        throw new Error(`Failed to fetch ticket: ${issueResponse.status}`);
+      if (error) {
+        throw new Error(error.message);
       }
 
-      const issue = await issueResponse.json();
-      
+      if (issue?.error) {
+        throw new Error(issue.error);
+      }
+
       // Extract attachments (screenshots/images)
-      const attachments = issue.fields.attachment || [];
+      const attachments = issue.fields?.attachment || [];
       const imageAttachments = attachments
         .filter((att: any) => att.mimeType?.startsWith('image/'))
         .map((att: any) => ({
@@ -74,23 +73,23 @@ export function useJira(): UseJiraReturn {
         }));
 
       // Parse description - handle Atlassian Document Format (ADF)
-      const description = parseADFToText(issue.fields.description);
+      const description = parseADFToText(issue.fields?.description);
       const renderedDescription = issue.renderedFields?.description || description;
 
       // Extract acceptance criteria if present (common custom field patterns)
-      const acceptanceCriteria = extractAcceptanceCriteria(issue.fields, description);
+      const acceptanceCriteria = extractAcceptanceCriteria(issue.fields || {}, description);
 
       const ticket: JiraTicket = {
         key: issue.key,
-        summary: issue.fields.summary,
+        summary: issue.fields?.summary,
         description,
         renderedDescription,
-        status: issue.fields.status?.name || 'Unknown',
-        type: issue.fields.issuetype?.name || 'Task',
-        priority: issue.fields.priority?.name || 'Medium',
-        assignee: issue.fields.assignee?.displayName,
-        reporter: issue.fields.reporter?.displayName,
-        labels: issue.fields.labels || [],
+        status: issue.fields?.status?.name || 'Unknown',
+        type: issue.fields?.issuetype?.name || 'Task',
+        priority: issue.fields?.priority?.name || 'Medium',
+        assignee: issue.fields?.assignee?.displayName,
+        reporter: issue.fields?.reporter?.displayName,
+        labels: issue.fields?.labels || [],
         attachments: imageAttachments,
         acceptanceCriteria,
         url: `https://${jiraConfig.domain}/browse/${ticketId}`,

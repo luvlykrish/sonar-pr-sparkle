@@ -8,7 +8,7 @@ import { Switch } from '@/components/ui/switch';
 import { Badge } from '@/components/ui/badge';
 import { Ticket, Eye, EyeOff, Save, CheckCircle, Link2 } from 'lucide-react';
 import { toast } from '@/hooks/use-toast';
-
+import { supabase } from '@/integrations/supabase/client';
 interface JiraConfigPanelProps {
   config: JiraConfig;
   onSave: (config: JiraConfig) => void;
@@ -43,26 +43,27 @@ export function JiraConfigPanel({ config, onSave }: JiraConfigPanelProps) {
 
     setIsTesting(true);
     try {
-      const auth = btoa(`${localConfig.email}:${localConfig.apiToken}`);
-      const response = await fetch(
-        `https://${localConfig.domain}/rest/api/3/myself`,
-        {
-          headers: {
-            'Authorization': `Basic ${auth}`,
-            'Accept': 'application/json',
-          },
-        }
-      );
+      const { data, error } = await supabase.functions.invoke('jira-proxy', {
+        body: {
+          action: 'test',
+          domain: localConfig.domain,
+          email: localConfig.email,
+          apiToken: localConfig.apiToken,
+        },
+      });
 
-      if (response.ok) {
-        const user = await response.json();
-        toast({
-          title: "Connection Successful",
-          description: `Connected as ${user.displayName}`,
-        });
-      } else {
-        throw new Error(`API returned ${response.status}`);
+      if (error) {
+        throw new Error(error.message);
       }
+
+      if (data?.error) {
+        throw new Error(data.error);
+      }
+
+      toast({
+        title: "Connection Successful",
+        description: `Connected as ${data.displayName}`,
+      });
     } catch (error) {
       toast({
         title: "Connection Failed",
