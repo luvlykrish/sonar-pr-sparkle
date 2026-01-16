@@ -1,7 +1,9 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { JiraConfig, JiraTicket, DEFAULT_JIRA_CONFIG } from '@/types/codeReview';
 import { toast } from '@/hooks/use-toast';
 import { supabase } from '@/integrations/supabase/client';
+import { useConfigDatabase } from '@/hooks/useConfigDatabase';
+
 interface UseJiraReturn {
   jiraConfig: JiraConfig;
   setJiraConfig: (config: JiraConfig) => void;
@@ -12,16 +14,23 @@ interface UseJiraReturn {
 }
 
 export function useJira(): UseJiraReturn {
-  const [jiraConfig, setJiraConfigState] = useState<JiraConfig>(() => {
-    const saved = localStorage.getItem('jira_config');
-    return saved ? JSON.parse(saved) : DEFAULT_JIRA_CONFIG;
-  });
+  const { getJiraConfig, saveConfig } = useConfigDatabase();
+  const [jiraConfig, setJiraConfigState] = useState<JiraConfig>(DEFAULT_JIRA_CONFIG);
   const [isLoading, setIsLoading] = useState(false);
 
-  const setJiraConfig = useCallback((config: JiraConfig) => {
+  // Load config from database on mount
+  useEffect(() => {
+    const loadConfig = async () => {
+      const dbConfig = await getJiraConfig();
+      setJiraConfigState(dbConfig);
+    };
+    loadConfig();
+  }, [getJiraConfig]);
+
+  const setJiraConfig = useCallback(async (config: JiraConfig) => {
     setJiraConfigState(config);
-    localStorage.setItem('jira_config', JSON.stringify(config));
-  }, []);
+    await saveConfig('jira', config);
+  }, [saveConfig]);
 
   const extractTicketId = useCallback((text: string): string | null => {
     if (!jiraConfig.enabled) return null;

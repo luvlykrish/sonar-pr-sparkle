@@ -1,6 +1,7 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { AIConfig, AIReviewResult, PullRequest, ReviewCommand, DEFAULT_AI_CONFIG, JiraTicket, BusinessLogicValidation } from '@/types/codeReview';
 import { toast } from '@/hooks/use-toast';
+import { useConfigDatabase } from '@/hooks/useConfigDatabase';
 
 interface PRFile {
   filename: string;
@@ -19,16 +20,23 @@ interface UseAIReviewReturn {
 }
 
 export function useAIReview(): UseAIReviewReturn {
-  const [aiConfig, setAIConfigState] = useState<AIConfig>(() => {
-    const saved = localStorage.getItem('ai_config');
-    return saved ? JSON.parse(saved) : DEFAULT_AI_CONFIG;
-  });
+  const { getAIConfig, saveConfig } = useConfigDatabase();
+  const [aiConfig, setAIConfigState] = useState<AIConfig>(DEFAULT_AI_CONFIG);
   const [isGenerating, setIsGenerating] = useState(false);
 
-  const setAIConfig = useCallback((config: AIConfig) => {
+  // Load config from database on mount
+  useEffect(() => {
+    const loadConfig = async () => {
+      const dbConfig = await getAIConfig();
+      setAIConfigState(dbConfig);
+    };
+    loadConfig();
+  }, [getAIConfig]);
+
+  const setAIConfig = useCallback(async (config: AIConfig) => {
     setAIConfigState(config);
-    localStorage.setItem('ai_config', JSON.stringify(config));
-  }, []);
+    await saveConfig('ai', config);
+  }, [saveConfig]);
 
   const generateReview = useCallback(async (
     pr: PullRequest,

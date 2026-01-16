@@ -42,16 +42,20 @@ export function PRDetailPanel({
   const [history, setHistory] = useState<AutoMergeHistoryEntry[]>([]);
 
   useEffect(() => {
-    if (pr) {
-      try {
-        setHistory(getHistory(pr.number));
-      } catch (e) {
-        console.error('Failed to load auto-merge history', e);
+    const loadHistory = async () => {
+      if (pr) {
+        try {
+          const data = await getHistory(pr.number);
+          setHistory(data);
+        } catch (e) {
+          console.error('Failed to load auto-merge history', e);
+          setHistory([]);
+        }
+      } else {
         setHistory([]);
       }
-    } else {
-      setHistory([]);
-    }
+    };
+    loadHistory();
   }, [pr]);
   if (!pr) {
     return (

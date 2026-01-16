@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { 
   PullRequest, 
   SonarQubeResults, 
@@ -6,6 +6,7 @@ import {
   DEFAULT_THRESHOLDS 
 } from '@/types/codeReview';
 import { toast } from '@/hooks/use-toast';
+import { useConfigDatabase } from '@/hooks/useConfigDatabase';
 
 interface UseCodeReviewReturn {
   thresholds: ThresholdConfig;
@@ -25,17 +26,24 @@ interface PRFile {
 }
 
 export function useCodeReview(): UseCodeReviewReturn {
-  const [thresholds, setThresholdsState] = useState<ThresholdConfig>(() => {
-    const saved = localStorage.getItem('sonar_thresholds');
-    return saved ? JSON.parse(saved) : DEFAULT_THRESHOLDS;
-  });
+  const { getThresholds, saveConfig } = useConfigDatabase();
+  const [thresholds, setThresholdsState] = useState<ThresholdConfig>(DEFAULT_THRESHOLDS);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisProgress, setAnalysisProgress] = useState(0);
 
-  const setThresholds = useCallback((newThresholds: ThresholdConfig) => {
+  // Load thresholds from database on mount
+  useEffect(() => {
+    const loadThresholds = async () => {
+      const dbThresholds = await getThresholds();
+      setThresholdsState(dbThresholds);
+    };
+    loadThresholds();
+  }, [getThresholds]);
+
+  const setThresholds = useCallback(async (newThresholds: ThresholdConfig) => {
     setThresholdsState(newThresholds);
-    localStorage.setItem('sonar_thresholds', JSON.stringify(newThresholds));
-  }, []);
+    await saveConfig('thresholds', newThresholds);
+  }, [saveConfig]);
 
   // Mock SonarQube results for demonstration (deterministic based on PR data)
   const mockSonarResults = useCallback((pr: PullRequest): SonarQubeResults => {

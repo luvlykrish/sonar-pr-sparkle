@@ -1,6 +1,7 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { GitHubConfig, PullRequest } from '@/types/codeReview';
 import { toast } from '@/hooks/use-toast';
+import { useConfigDatabase, getPRCommentId, savePRCommentId } from '@/hooks/useConfigDatabase';
 
 interface UseGitHubReturn {
   config: GitHubConfig | null;
@@ -25,18 +26,29 @@ interface PRFile {
 }
 
 export function useGitHub(): UseGitHubReturn {
-  const [config, setConfigState] = useState<GitHubConfig | null>(() => {
-    const saved = localStorage.getItem('github_config');
-    return saved ? JSON.parse(saved) : null;
-  });
+  const { getGitHubConfig, saveConfig } = useConfigDatabase();
+  const [config, setConfigState] = useState<GitHubConfig | null>(null);
   const [pullRequests, setPullRequests] = useState<PullRequest[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isInitialized, setIsInitialized] = useState(false);
 
-  const setConfig = useCallback((newConfig: GitHubConfig) => {
+  // Load config from database on mount
+  useEffect(() => {
+    const loadConfig = async () => {
+      const dbConfig = await getGitHubConfig();
+      if (dbConfig) {
+        setConfigState(dbConfig);
+      }
+      setIsInitialized(true);
+    };
+    loadConfig();
+  }, [getGitHubConfig]);
+
+  const setConfig = useCallback(async (newConfig: GitHubConfig) => {
     setConfigState(newConfig);
-    localStorage.setItem('github_config', JSON.stringify(newConfig));
-  }, []);
+    await saveConfig('github', newConfig);
+  }, [saveConfig]);
 
   const githubFetch = useCallback(async (endpoint: string) => {
     if (!config) throw new Error('GitHub not configured');
@@ -240,9 +252,8 @@ export function useGitHub(): UseGitHubReturn {
     });
 
     try {
-      // storage key to persist the comment id so we can reliably update the same comment
-      const storageKey = `codegate_comment_${config.owner}_${config.repo}_pr_${prNumber}`;
-      const storedId = localStorage.getItem(storageKey);
+      // Get stored comment ID from database
+      const storedId = await getPRCommentId(config.owner, config.repo, prNumber);
 
       const doFetch = async (method: string, url: string, headers: Record<string, string>, bodyObj?: any) => {
         const res = await fetch(url, {
@@ -300,9 +311,7 @@ export function useGitHub(): UseGitHubReturn {
         }
 
         if (response.ok) {
-          try {
-            localStorage.setItem(storageKey, String(existing.id));
-          } catch {}
+          await savePRCommentId(config.owner, config.repo, prNumber, String(existing.id));
         }
       } else {
         response = await doFetch('POST', postUrl, buildHeaders(`Bearer ${config.token}`), { body: bodyWithMarker });
@@ -312,9 +321,9 @@ export function useGitHub(): UseGitHubReturn {
 
         if (response.ok) {
           const rspJson = await response.json().catch(() => null);
-          try {
-            if (rspJson?.id) localStorage.setItem(storageKey, String(rspJson.id));
-          } catch {}
+          if (rspJson?.id) {
+            await savePRCommentId(config.owner, config.repo, prNumber, String(rspJson.id));
+          }
         }
       }
 
