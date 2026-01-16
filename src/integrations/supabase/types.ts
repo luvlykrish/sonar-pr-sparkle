@@ -14,7 +14,141 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      app_configurations: {
+        Row: {
+          config_data: Json
+          config_type: string
+          created_at: string
+          id: string
+          updated_at: string
+        }
+        Insert: {
+          config_data?: Json
+          config_type: string
+          created_at?: string
+          id?: string
+          updated_at?: string
+        }
+        Update: {
+          config_data?: Json
+          config_type?: string
+          created_at?: string
+          id?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      auto_merge_history: {
+        Row: {
+          ai_score: number | null
+          ai_threshold: number | null
+          created_at: string
+          decision: string | null
+          details: string | null
+          id: string
+          mode: string | null
+          pr_number: number
+          sonar_issues: number | null
+          sonar_threshold: number | null
+        }
+        Insert: {
+          ai_score?: number | null
+          ai_threshold?: number | null
+          created_at?: string
+          decision?: string | null
+          details?: string | null
+          id?: string
+          mode?: string | null
+          pr_number: number
+          sonar_issues?: number | null
+          sonar_threshold?: number | null
+        }
+        Update: {
+          ai_score?: number | null
+          ai_threshold?: number | null
+          created_at?: string
+          decision?: string | null
+          details?: string | null
+          id?: string
+          mode?: string | null
+          pr_number?: number
+          sonar_issues?: number | null
+          sonar_threshold?: number | null
+        }
+        Relationships: []
+      }
+      merge_conflict_resolutions: {
+        Row: {
+          ai_analysis: string | null
+          conflict_content: string | null
+          created_at: string
+          file_path: string
+          has_business_logic: boolean | null
+          id: string
+          pr_number: number
+          resolution_strategy: string | null
+          resolved_content: string | null
+          status: string | null
+          updated_at: string
+        }
+        Insert: {
+          ai_analysis?: string | null
+          conflict_content?: string | null
+          created_at?: string
+          file_path: string
+          has_business_logic?: boolean | null
+          id?: string
+          pr_number: number
+          resolution_strategy?: string | null
+          resolved_content?: string | null
+          status?: string | null
+          updated_at?: string
+        }
+        Update: {
+          ai_analysis?: string | null
+          conflict_content?: string | null
+          created_at?: string
+          file_path?: string
+          has_business_logic?: boolean | null
+          id?: string
+          pr_number?: number
+          resolution_strategy?: string | null
+          resolved_content?: string | null
+          status?: string | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      pr_comment_ids: {
+        Row: {
+          comment_id: string
+          created_at: string
+          id: string
+          owner: string
+          pr_number: number
+          repo: string
+          updated_at: string
+        }
+        Insert: {
+          comment_id: string
+          created_at?: string
+          id?: string
+          owner: string
+          pr_number: number
+          repo: string
+          updated_at?: string
+        }
+        Update: {
+          comment_id?: string
+          created_at?: string
+          id?: string
+          owner?: string
+          pr_number?: number
+          repo?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
